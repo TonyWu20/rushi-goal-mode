@@ -12,8 +12,7 @@ This repo contains the four pieces that form one capability:
 | `goal-ext/` | TUI extension: command palette + row slot | TUI `[ext] dir` (via the `ui_extensions/goal` symlink) |
 
 All four depend on `goal-state` via a local path dep. No crate in this repo
-depends on anything outside the kernel (`rushi-common`) except `goal-state`
-itself.
+depends on anything outside this repo.
 
 ## Build
 
@@ -52,7 +51,8 @@ layer.
 ## Repo boundaries
 
 - This repo is self-contained: no path deps outside the kernel.
-- `goal-state` is the single source of truth for the goal JSON schema.
-  The hooks, tools, and ext all read/write the same file through it.
-- The kernel repo (`rust-unix-harness`) must not vendor a copy of
-  `goal-state`; it only knows the hook binary names and tool manifests.
+- `goal-state` is the single source of truth for the goal JSON schema
+  and lives in this repo (it left the kernel at the split). The hooks,
+  tools, and ext all read/write the same file through it.
+- The kernel repo (`rust-unix-harness`) no longer carries `goal-state`;
+  it only knows the hook binary names and tool manifests.
