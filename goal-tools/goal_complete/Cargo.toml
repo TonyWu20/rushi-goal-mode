@@ -1,0 +1,32 @@
+# The `goal_complete` loop tool: mark the active goal as complete so
+# the loop stops pursuing it.
+#
+# Bootstrap split (docs/tui-ext-repo-split.md section 4, item 16): goal
+# mode is extension-owned, so the goal-mode loop tools moved from the
+# kernel `tools/` to the exts repo's `goal-tools/` group. Standalone
+# cargo package: the empty `[workspace]` table stops cargo from
+# attaching it to an ancestor workspace, like the goal ext, the ext-rs
+# entries, and the goal-hooks.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/goal_complete. The loop's route resolves the manifest
+# from the extra tools root (RUSHI_EXTRA_TOOLS_ROOT) and finds the
+# binary on PATH; `ext-env.sh` puts the target dirs on PATH.
+
+[package]
+name = "goal_complete"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "goal_complete"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1.0"
+regex = "1"
+# `goal-state` is a sibling crate in this exts repo. All goal-mode
+# packages share it via a local path dep.
+goal-state = { path = "../../goal-state" }

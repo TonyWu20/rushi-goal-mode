@@ -1,0 +1,34 @@
+# The `run.idle` goal hook: while a goal is open and not
+# blocked/paused, continues the loop with a continuation prompt (no
+# budget cap, docs/goal-ux.md section 1.6); records per-goal token
+# accounting into the goal state file.
+#
+# Bootstrap split (docs/tui-ext-repo-split.md section 4): goal mode is
+# extension-owned, so the four `harness-hook-goal-*` loop hooks moved
+# from the kernel `bin/` to the exts repo's `goal-hooks/` group.
+# Standalone cargo package: the empty `[workspace]` table stops cargo
+# from attaching it to an ancestor workspace, like the goal ext and
+# the ext-rs entries.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/harness-hook-goal-idle. The loop resolves the bare
+# name from config.toml's [hooks] on PATH; `ext-env.sh` puts the
+# target dirs on PATH.
+
+[package]
+name = "hook-goal-idle"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "harness-hook-goal-idle"
+path = "src/main.rs"
+
+[dependencies]
+goal-state = { path = "../../goal-state" }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

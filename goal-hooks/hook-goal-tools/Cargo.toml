@@ -1,0 +1,30 @@
+# The `tool.before` goal hook: blocks stale goal tool calls
+# (`goal_complete` / `goal_blocked` for a goal that is no longer the
+# open one, or when no goal is open) before the tool runs.
+#
+# Bootstrap split (docs/tui-ext-repo-split.md section 4): goal mode is
+# extension-owned, so the four `harness-hook-goal-*` loop hooks moved
+# from the kernel `bin/` to the exts repo's `goal-hooks/` group.
+# Standalone cargo package: the empty `[workspace]` table stops cargo
+# from attaching it to an ancestor workspace, like the goal ext and
+# the ext-rs entries.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/harness-hook-goal-tools. The loop resolves the bare
+# name from config.toml's [hooks] on PATH; `ext-env.sh` puts the
+# target dirs on PATH.
+
+[package]
+name = "hook-goal-tools"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "harness-hook-goal-tools"
+path = "src/main.rs"
+
+[dependencies]
+goal-state = { path = "../../goal-state" }
+serde_json = "1.0"

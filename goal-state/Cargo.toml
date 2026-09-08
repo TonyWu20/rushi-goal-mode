@@ -1,0 +1,23 @@
+# Shared goal-mode state library for the exts goal packages.
+#
+# Standalone cargo package: the empty `[workspace]` table stops cargo
+# from attaching it to an ancestor workspace, matching every other
+# package in this exts repo.
+#
+# Build: `cargo build` in this directory (a library, so no binary).
+# The goal-hooks/, goal-tools/, and ui_extensions/goal packages
+# depend on it via `path = "../../goal-state"`.
+
+[package]
+name = "goal-state"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

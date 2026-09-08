@@ -1,0 +1,30 @@
+# The `compact.before` goal hook: preserves the open goal across
+# compaction (re-sends the goal state so the compacted context keeps
+# the objective).
+#
+# Bootstrap split (docs/tui-ext-repo-split.md section 4): goal mode is
+# extension-owned, so the four `harness-hook-goal-*` loop hooks moved
+# from the kernel `bin/` to the exts repo's `goal-hooks/` group.
+# Standalone cargo package: the empty `[workspace]` table stops cargo
+# from attaching it to an ancestor workspace, like the goal ext and
+# the ext-rs entries.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/harness-hook-goal-compact. The loop resolves the
+# bare name from config.toml's [hooks] on PATH; `ext-env.sh` puts the
+# target dirs on PATH.
+
+[package]
+name = "hook-goal-compact"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "harness-hook-goal-compact"
+path = "src/main.rs"
+
+[dependencies]
+goal-state = { path = "../../goal-state" }
+serde_json = "1.0"
