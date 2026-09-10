@@ -56,13 +56,15 @@ fn main() {
     };
 
     // Token accounting (informational only, docs/goal-ux.md §1.6):
-    // advance used_tokens by the output_tokens of the most recent
-    // assistant message. This drives the TUI status line, never the
-    // loop. Placed before the is_open check so the final turn's
-    // tokens are captured even when the goal just closed.
+    // set used_tokens to the cumulative output_tokens total across all
+    // assistant_message and compaction_summary events in the log.
+    // This is idempotent and compaction-robust: the log is
+    // append-only, so re-reading after a compact still covers the
+    // full session history. Placed before the is_open check so the
+    // final turn's tokens are captured even when the goal just closed.
     let events_path = session_dir.join("events.jsonl");
-    if let Some(usage) = GoalState::read_last_assistant_output_tokens(&events_path) {
-        goal.add_used(usage);
+    if let Some(total) = GoalState::sum_assistant_output_tokens(&events_path) {
+        goal.used_tokens = total;
     }
 
     // A completed, blocked, or paused goal stops the loop.
@@ -177,8 +179,8 @@ mod tests {
         assert!(prompt.contains("continuation #101"), "{prompt}");
     }
 
-    /// A closed goal (completed/blocked) still records the last
-    /// assistant message's token usage before the loop stops.
+    /// A closed goal (completed/blocked) still records cumulative
+    /// token usage from the log before the loop stops.
     /// This ensures used_tokens is recorded even when the goal closes
     /// on the very turn the idle hook fires.
     #[test]
@@ -188,31 +190,37 @@ mod tests {
         g.mark_completed();
         g.save(dir.path()).unwrap();
 
-        // Simulate the last assistant message carrying usage data.
+        // Simulate assistant messages and a compaction summary with
+        // usage data in the log.
         let events_path = dir.path().join("events.jsonl");
         std::fs::write(
             &events_path,
-            r#"{"v":1,"type":"assistant_message","content":"done","stop_reason":"stop","usage":{"input_tokens":100,"output_tokens":42}}"#,
+            concat!(
+                "{\"v\":1,\"type\":\"assistant_message\",\"content\":\"work\",\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":100,\"output_tokens\":42}}\n",
+                "{\"v\":1,\"type\":\"compaction_summary\",\"ts\":\"t2\",\"usage\":{\"input_tokens\":5000,\"output_tokens\":800}}\n",
+                "{\"v\":1,\"type\":\"assistant_message\",\"content\":\"done\",\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":100,\"output_tokens\":58}}\n",
+            ),
         )
         .unwrap();
 
-        // Simulate what main() does after the fix:
+        // Simulate what main() does:
         // token accounting runs BEFORE the is_open() check.
         let mut loaded = GoalState::load(dir.path()).unwrap();
         assert!(!loaded.is_open(), "goal should be closed");
         assert_eq!(loaded.used_tokens, 0, "no tokens yet");
 
-        let usage = GoalState::read_last_assistant_output_tokens(&events_path);
-        assert_eq!(usage, Some(42));
-        loaded.add_used(usage.unwrap());
+        // The sum of all output_tokens: 42 + 800 + 58 = 900.
+        let total = GoalState::sum_assistant_output_tokens(&events_path);
+        assert_eq!(total, Some(900));
+        loaded.used_tokens = total.unwrap();
 
         // Save and verify the token count was recorded despite the
         // goal being closed.
         loaded.save(dir.path()).unwrap();
         let reloaded = GoalState::load(dir.path()).unwrap();
         assert_eq!(
-            reloaded.used_tokens, 42,
-            "closed goal should still record final-turn tokens"
+            reloaded.used_tokens, 900,
+            "closed goal should still record cumulative tokens"
         );
         assert!(reloaded.completed);
     }

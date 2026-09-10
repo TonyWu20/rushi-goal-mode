@@ -45,9 +45,13 @@ pub struct GoalState {
     /// Whether the goal is currently being pursued.
     #[serde(default)]
     pub active: bool,
-    /// Cumulative assistant tokens spent on this goal. Informational
-    /// only (docs/goal-ux.md §1.6): it drives the TUI status line and
-    /// never the loop.
+    /// Cumulative assistant output tokens for the session, as the sum
+    /// of `usage.output_tokens` across every `assistant_message` and
+    /// `compaction_summary` event in `events.jsonl` (see
+    /// [`Self::sum_assistant_output_tokens`]). Informational only
+    /// (docs/goal-ux.md §1.6): it drives the TUI status line and
+    /// never the loop. The `run.idle` hook assigns it (not adds) so
+    /// it is idempotent and stable across compactions.
     #[serde(default)]
     pub used_tokens: u64,
     /// The continuation counter: `run.idle` increments it on every
@@ -436,28 +440,50 @@ impl GoalState {
         self.used_tokens = self.used_tokens.saturating_add(tokens);
     }
 
-    /// Read the `events.jsonl` log and return the `output_tokens` of the
-    /// most recent `assistant_message` that carries a `usage` reading.
-    /// Returns `None` when the log is absent or no measured message exists.
+    /// Sum `output_tokens` across every usage-bearing message in the
+    /// `events.jsonl` log.
     ///
-    /// Used by the `run.idle` hook to advance the goal's informational
-    /// token accounting one step per loop iteration (docs/goal-ux.md
-    /// §1.6: the display figure, not a cap).
-    pub fn read_last_assistant_output_tokens(events_path: &Path) -> Option<u64> {
+    /// Counts the `usage.output_tokens` of both `assistant_message` events
+    /// (the agent's model calls) and `compaction_summary` events (the
+    /// auto-compaction summary calls), matching the TUI statusline's
+    /// cumulative-usage convention (docs/auto-compact-plan.md section 4.6).
+    /// Returns `None` when the log is absent or no usage-bearing message
+    /// exists.
+    ///
+    /// The log is append-only: auto-compaction appends `compaction_started`
+    /// / `compaction_summary` markers and the summary's own assistant
+    /// message, but never truncates or rewrites earlier lines. So the
+    /// running total is stable across compactions — re-reading the log
+    /// after a compact does not "reset" the figure; it still covers the
+    /// full session history. This is what the `run.idle` hook assigns to
+    /// the goal's `used_tokens` (docs/goal-ux.md §1.6: the display figure,
+    /// not a cap).
+    pub fn sum_assistant_output_tokens(events_path: &Path) -> Option<u64> {
         let data = std::fs::read_to_string(events_path).ok()?;
-        data.lines().rev().find_map(|line| {
+        let mut total: u64 = 0;
+        let mut found = false;
+        for line in data.lines() {
             let line = line.trim();
             if line.is_empty() {
-                return None;
+                continue;
             }
-            let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            if v.get("type").and_then(|t| t.as_str()) != Some("assistant_message") {
-                return None;
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let ty = v.get("type").and_then(|t| t.as_str());
+            if ty != Some("assistant_message") && ty != Some("compaction_summary") {
+                continue;
             }
-            v.get("usage")
+            if let Some(out) = v
+                .get("usage")
                 .and_then(|u| u.get("output_tokens"))
                 .and_then(|i| i.as_u64())
-        })
+            {
+                total = total.saturating_add(out);
+                found = true;
+            }
+        }
+        found.then_some(total)
     }
 
     /// XML-escape `&`, `<`, `>`, and `"` so the objective cannot
@@ -692,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn read_last_assistant_output_tokens_reads_log() {
+    fn sum_assistant_output_tokens_sums_all_messages() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("events.jsonl");
         std::fs::write(
@@ -704,14 +730,32 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(GoalState::read_last_assistant_output_tokens(&log), Some(9));
+        // Sums all assistant_message output_tokens: 3 + 9 = 12.
+        assert_eq!(GoalState::sum_assistant_output_tokens(&log), Some(12));
     }
 
     #[test]
-    fn read_last_assistant_output_tokens_missing_log_is_none() {
+    fn sum_assistant_output_tokens_includes_compaction_summary() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("events.jsonl");
-        assert_eq!(GoalState::read_last_assistant_output_tokens(&log), None);
+        std::fs::write(
+            &log,
+            concat!(
+                "{\"v\":1,\"type\":\"assistant_message\",\"ts\":\"t1\",\"usage\":{\"input_tokens\":100,\"output_tokens\":500}}\n",
+                "{\"v\":1,\"type\":\"compaction_summary\",\"ts\":\"t2\",\"usage\":{\"input_tokens\":50000,\"output_tokens\":8000}}\n",
+                "{\"v\":1,\"type\":\"assistant_message\",\"ts\":\"t3\",\"usage\":{\"input_tokens\":300,\"output_tokens\":600}}\n",
+            ),
+        )
+        .unwrap();
+        // 500 (assistant) + 8000 (compaction) + 600 (assistant) = 9100.
+        assert_eq!(GoalState::sum_assistant_output_tokens(&log), Some(9100));
+    }
+
+    #[test]
+    fn sum_assistant_output_tokens_missing_log_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        assert_eq!(GoalState::sum_assistant_output_tokens(&log), None);
     }
 
     // ── per-goal file layout (goal-<id>.json + goal.json pointer) ──
