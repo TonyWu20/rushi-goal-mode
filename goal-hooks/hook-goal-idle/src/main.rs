@@ -56,14 +56,15 @@ fn main() {
     };
 
     // Token accounting (informational only, docs/goal-ux.md §1.6):
-    // set used_tokens to the cumulative output_tokens total across all
-    // assistant_message and compaction_summary events in the log.
-    // This is idempotent and compaction-robust: the log is
-    // append-only, so re-reading after a compact still covers the
-    // full session history. Placed before the is_open check so the
+    // set used_tokens to the cumulative input+output total across all
+    // assistant_message and compaction_summary events in the log — the
+    // same figure the TUI statusline shows as `sum` (docs/auto-compact-
+    // plan.md section 4.6). This is idempotent and compaction-robust:
+    // the log is append-only, so re-reading after a compact still covers
+    // the full session history. Placed before the is_open check so the
     // final turn's tokens are captured even when the goal just closed.
     let events_path = session_dir.join("events.jsonl");
-    if let Some(total) = GoalState::sum_assistant_output_tokens(&events_path) {
+    if let Some(total) = GoalState::sum_usage_tokens(&events_path) {
         goal.used_tokens = total;
     }
 
@@ -209,9 +210,10 @@ mod tests {
         assert!(!loaded.is_open(), "goal should be closed");
         assert_eq!(loaded.used_tokens, 0, "no tokens yet");
 
-        // The sum of all output_tokens: 42 + 800 + 58 = 900.
-        let total = GoalState::sum_assistant_output_tokens(&events_path);
-        assert_eq!(total, Some(900));
+        // The sum of all input+output tokens: (100+42) + (5000+800)
+        // + (100+58) = 6100.
+        let total = GoalState::sum_usage_tokens(&events_path);
+        assert_eq!(total, Some(6100));
         loaded.used_tokens = total.unwrap();
 
         // Save and verify the token count was recorded despite the
@@ -219,7 +221,7 @@ mod tests {
         loaded.save(dir.path()).unwrap();
         let reloaded = GoalState::load(dir.path()).unwrap();
         assert_eq!(
-            reloaded.used_tokens, 900,
+            reloaded.used_tokens, 6100,
             "closed goal should still record cumulative tokens"
         );
         assert!(reloaded.completed);
