@@ -1,6 +1,13 @@
 # The `goal` commands extension for the TUI command palette
 # (docs/goal-ux.md). Registers user-facing goal commands:
-#   goal, goal_edit, goal_pause, goal_clear, goal_resume
+#   goal, goal_edit, goal_pause, goal_clear, goal_resume, goal_status
+#
+# `goal status` shows the full goal text and status (active /
+# paused / blocked / completed) in the palette preview pane (the
+# floating window), as a workaround for the width-truncated goal row
+# above the input box. The `help` text of the `goal status` entry is
+# built fresh on every palette open so the preview always reflects
+# the current goal state.
 #
 # Event-driven goal setting (docs/goal-ux.md §1.1, §1.8):
 # When the user selects `goal` or `goal_edit` from the palette, the

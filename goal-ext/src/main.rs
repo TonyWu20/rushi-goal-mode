@@ -1,7 +1,7 @@
 //! The `goal` commands extension for the TUI command palette
 //! (docs/goal-ux.md §1.1, §1.4, §1.8). Registers the pi-goal
 //! port's user-facing commands: `goal`, `goal_edit`, `goal_pause`,
-//! `goal_clear`, and `goal_resume`.
+//! `goal_clear`, `goal_resume`, and `goal_status`.
 //!
 //! Row slot (docs/ui-extension.md section 4, `row` capability):
 //! The host reserves one row above the input box; this extension
@@ -41,6 +41,12 @@
 //!     remain).
 //!   - `goal_resume`— re-activate a previously blocked or completed
 //!     goal by rewriting its state file directly.
+//!   - `goal_status`— display the current goal's full text and status
+//!     (active / paused / blocked / completed) in the palette preview
+//!     pane (the floating command window). The row truncates goal
+//!     text to terminal width so the timer and token counter stay
+//!     visible; the preview pane shows the full untruncated content
+//!     when the user highlights `goal status` in the palette.
 //!
 //! Agent-side tools (tools/goal, tools/goal_complete, tools/goal_blocked)
 //! are NOT registered here — they are called by the model, not by the
@@ -50,6 +56,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// One host op. Fields the extension does not use are optional: serde
 /// skips unknown fields, so the host may grow the op later.
@@ -80,6 +87,11 @@ struct Op {
     /// modal normal mode (the user must press `i` first).
     #[serde(default)]
     mode: Option<String>,
+    /// The terminal pane width in columns, sent on `row` (and `tick`)
+    /// ops. The goal status line truncates the goal text to this
+    /// width so the timer and token counter stay visible.
+    #[serde(default)]
+    width: Option<usize>,
 }
 
 /// Unix epoch seconds (i64), the base of the timestamp convention
@@ -129,6 +141,29 @@ fn main() {
                 if let Some(s) = &op.session {
                     session = Some(s.clone());
                 }
+                // The `goal status` preview-pane content, built fresh
+                // on every palette open so it reflects the current
+                // goal state. The palette preview pane renders this
+                // help text as multi-line, scrollable content in the
+                // float (docs/tui-command-palette.md section 11): the
+                // workaround for the width-truncated row line.
+                let goal_status_help =
+                    if let (Some(sess), Some(root)) = (&session, &sessions_root) {
+                        let session_dir = root.join(sess);
+                        match goal_state::GoalState::load(&session_dir) {
+                            Some(g) => {
+                                let elapsed = goal_elapsed(&g, ts_now_secs());
+                                goal_status_help(&g, elapsed)
+                            }
+                            None => {
+                                "No goal in this session.\nUse 'goal' to start one."
+                                    .to_string()
+                            }
+                        }
+                    } else {
+                        "No active session or sessions root available."
+                            .to_string()
+                    };
                 let reply = json!({
                     "v": 1,
                     "op": "commands_list",
@@ -171,6 +206,14 @@ fn main() {
                             "kind": "run",
                             "hint": "",
                             "help": "Resume a blocked goal. Start a fresh goal after a clear or a completion.",
+                            "options": []
+                        },
+                        {
+                            "id": "goal_status",
+                            "label": "goal status",
+                            "kind": "run",
+                            "hint": "",
+                            "help": goal_status_help,
                             "options": []
                         }
                     ]
@@ -271,6 +314,7 @@ fn main() {
                     &sessions_root,
                     armed.as_deref(),
                     op.mode.as_deref(),
+                    op.width,
                 );
                 let reply = json!({
                     "v": 1,
@@ -450,17 +494,91 @@ fn handle_invoke<W: Write>(
                 Err(e) => (false, format!("Failed to write goal.json: {e}"), None),
             }
         }
+        "goal_status" => {
+            // The full goal content is displayed in the palette
+            // preview pane (the `help` field of this command entry,
+            // rendered by the TUI float). The invoke is a brief
+            // confirmation; the user already sees the content while
+            // the palette is open.
+            let Some(g) = goal_state::GoalState::load(&session_dir) else {
+                return (true, "No goal in this session.".to_string(), None);
+            };
+            let status = if g.is_open() { "active" } else if g.blocked { "blocked" } else if g.completed { "completed" } else { "paused" };
+            (true, format!("goal [{status}] shown in preview above"), None)
+        }
         _ => (false, format!("unknown goal command: {id}"), None),
     }
+}
+
+/// The live (or, for a closed goal, total) elapsed time in seconds
+/// since the goal opened. A closed goal (blocked or completed) reports
+/// the span from `opened_at` to `closed_at`; an open or paused goal
+/// reports now minus `opened_at`.
+fn goal_elapsed(g: &goal_state::GoalState, now_secs: i64) -> i64 {
+    let opened = parse_ts_secs(g.opened_at.as_deref()).unwrap_or(0);
+    let end = if g.blocked || g.completed {
+        parse_ts_secs(g.closed_at.as_deref()).unwrap_or(now_secs)
+    } else {
+        now_secs
+    };
+    (end - opened).max(0)
+}
+
+/// Parse a `t+<secs>s` timestamp into epoch seconds.
+fn parse_ts_secs(ts: Option<&str>) -> Option<i64> {
+    ts.and_then(|t| {
+        t.strip_prefix("t+")
+            .and_then(|rest| rest.strip_suffix('s'))
+            .and_then(|n| n.parse::<i64>().ok())
+    })
+}
+
+/// Build the multi-line `help` text for the `goal_status` palette
+/// entry. Rendered in the preview pane of the floating command
+/// palette (docs/tui-command-palette.md section 11): the user opens
+/// the palette, highlights `goal status`, and the preview pane shows
+/// the full goal content, status, elapsed time, token count, and
+/// block reason — scrollable and never truncated by terminal width.
+fn goal_status_help(g: &goal_state::GoalState, elapsed: i64) -> String {
+    let status = if g.is_open() {
+        "active"
+    } else if g.blocked {
+        "blocked"
+    } else if g.completed {
+        "completed"
+    } else {
+        "paused"
+    };
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "⚡ [{}] {} · {} · {}",
+        status,
+        g.id,
+        format_duration(elapsed),
+        format_token_count(g.used_tokens)
+    ));
+    // The goal text verbatim; may span multiple lines itself.
+    lines.push(g.goal.clone());
+    if let Some(r) = &g.block_reason {
+        lines.push(format!("blocked: {r}"));
+    }
+    lines.join("\n")
 }
 
 /// The content of the host-reserved row (docs/ui-extension.md section
 /// 4, `row` capability). The row op is tick-driven: the session comes
 /// from the op when present, else the remembered `commands` session.
+/// The `width` is the pane width the host reports on the row op; the
+/// goal status line truncates the goal text to it so the timer and
+/// the token counter always stay on the line (the host clips an
+/// over-long row, it never wraps the row slot).
 ///
 /// Lines, in order:
 ///   1. The goal status line while a goal is open:
-///      ` ⚡ "goal text" · 2m 34s · 12.4k ` (green, bold).
+///      ` ⚡ "goal text" · 2m 34s · 12.4k ` (green, bold). When the
+///      goal text is too long for the width, the middle is elided
+///      with `…` (see [`truncate_middle`]); the timer and token
+///      counter keep their place at the right of the line.
 ///   2. The armed hint while a goal write/edit is pending
 ///      (docs/goal-ux.md §1.8): "type your goal" in insert mode,
 ///      "press i, type your goal" in a modal normal mode (yellow,
@@ -473,6 +591,7 @@ fn build_row_lines(
     sessions_root: &Option<PathBuf>,
     armed: Option<&str>,
     mode: Option<&str>,
+    width: Option<usize>,
 ) -> Vec<serde_json::Value> {
     let mut lines: Vec<serde_json::Value> = Vec::new();
     let sess = op_session.as_ref().or(remembered_session.as_ref());
@@ -483,22 +602,20 @@ fn build_row_lines(
                 // Elapsed since the goal opened: `opened_at` is the
                 // `t+<secs>s` convention shared with goal-state.
                 let now_secs = ts_now_secs();
-                let opened_secs = g
-                    .opened_at
-                    .as_deref()
-                    .and_then(|ts| {
-                        ts.strip_prefix("t+")
-                            .and_then(|rest| rest.strip_suffix('s'))
-                            .and_then(|n| n.parse::<i64>().ok())
-                    })
-                    .unwrap_or(0);
-                let elapsed = (now_secs - opened_secs).max(0);
-                let text = format!(
-                    " ⚡ \"{}\" · {} · {}",
-                    g.goal,
-                    format_duration(elapsed),
-                    format_token_count(g.used_tokens)
-                );
+                let elapsed = goal_elapsed(&g, now_secs);
+                let dur_str = format_duration(elapsed);
+                let tok_str = format_token_count(g.used_tokens);
+                // The line is ` ⚡ "<goal>" · <dur> · <tok>`: the
+                // prefix and suffix are fixed, so the goal text gets
+                // the remaining columns of the width.
+                let prefix = " ⚡ \"";
+                let suffix = format!("\" · {dur_str} · {tok_str}");
+                let fixed = prefix.width() + suffix.width();
+                let goal_text = match width {
+                    Some(w) => truncate_middle(&g.goal, w.saturating_sub(2).saturating_sub(fixed)),
+                    None => g.goal.clone(),
+                };
+                let text = format!("{prefix}{goal_text}{suffix}");
                 lines.push(json!([text, {"fg": "green", "bold": true}]));
             }
         }
@@ -517,6 +634,60 @@ fn build_row_lines(
         lines.push(json!([text, {"fg": "yellow", "bold": true}]));
     }
     lines
+}
+
+/// Truncate a string to at most `max_cols` display columns, keeping
+/// the start and the end and eliding the middle with `…` (the
+/// standard status-line convention for long paths). The original
+/// string is returned unchanged when it already fits. `max_cols`
+/// counts the ellipsis itself: the result never exceeds `max_cols`
+/// display columns.
+///
+/// Uses `unicode-width` so that multi-column characters (e.g. `⚡`,
+/// CJK ideographs, emoji) are measured by their terminal column
+/// width, not by `char` count.
+fn truncate_middle(s: &str, max_cols: usize) -> String {
+    let total = s.width();
+    if total <= max_cols {
+        return s.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+    if max_cols == 1 {
+        return "…".to_string();
+    }
+    // Reserve 1 column for the ellipsis; split the remainder between
+    // the head and the tail.
+    let budget = max_cols - 1;
+    let head = budget / 2;
+    let tail = budget - head;
+    let chars: Vec<char> = s.chars().collect();
+    // Walk forward: accumulate display width for the head portion.
+    let mut head_end = 0;
+    let mut head_w = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        let cw = c.width().unwrap_or(1);
+        if head_w + cw > head {
+            break;
+        }
+        head_w += cw;
+        head_end = i + 1;
+    }
+    // Walk backward: accumulate display width for the tail portion.
+    let mut tail_start = chars.len();
+    let mut tail_w = 0;
+    for (i, &c) in chars.iter().enumerate().rev() {
+        let cw = c.width().unwrap_or(1);
+        if tail_w + cw > tail {
+            break;
+        }
+        tail_w += cw;
+        tail_start = i;
+    }
+    let head_str: String = chars[..head_end].iter().collect();
+    let tail_str: String = chars[tail_start..].iter().collect();
+    format!("{head_str}…{tail_str}")
 }
 
 /// Format a token count for display (moved from the TUI with the
@@ -603,7 +774,9 @@ fn append_ext_status<W: Write>(out: &mut W, session_dir: &std::path::Path, id: &
 
 #[cfg(test)]
 mod tests {
-    use crate::{build_row_lines, handle_invoke};
+    use crate::{
+        build_row_lines, goal_elapsed, goal_status_help, handle_invoke, truncate_middle,
+    };
 
     #[test]
     fn test_goal_pause() {
@@ -761,11 +934,13 @@ mod tests {
         g.save(&session_dir).unwrap();
 
         let root = Some(dir.path().to_path_buf());
-        // The op's session wins over the remembered one.
+        // The op's session wins over the remembered one. Width None:
+        // no truncation.
         let lines = build_row_lines(
             &Some("s1".to_string()),
             &None,
             &root,
+            None,
             None,
             None,
         );
@@ -781,8 +956,93 @@ mod tests {
     }
 
     #[test]
+    fn test_row_lines_truncates_long_goal_to_keep_timer_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut g = goal_state::GoalState::new(
+            "Ship a very long goal that runs far longer than the terminal width allows so the timer and token counter would wrap off screen",
+        );
+        g.opened_at = Some("t+0s".to_string());
+        g.used_tokens = 1_240_000; // -> 1.2M
+        g.save(&session_dir).unwrap();
+
+        let root = Some(dir.path().to_path_buf());
+        // A narrow pane: the full goal text cannot fit.
+        let lines = build_row_lines(
+            &Some("s1".to_string()),
+            &None,
+            &root,
+            None,
+            None,
+            Some(60),
+        );
+        let text = lines[0].as_array().unwrap()[0].as_str().unwrap();
+        // The timer and token counter stay on the line even after the
+        // goal text is elided.
+        assert!(text.contains("1.2M"), "token counter must survive truncation: {text}");
+        assert!(text.contains("…"), "goal text must be elided: {text}");
+        // The rendered line must not exceed the requested width.
+        assert!(text.chars().count() <= 60, "line must not exceed the pane width: {text}");
+        let pair = lines[0].as_array().expect("a [text, style] pair");
+        let style = pair[1].as_object().expect("the style object");
+        assert_eq!(style.get("fg"), Some(&serde_json::json!("green")));
+    }
+
+    #[test]
+    fn test_row_lines_short_goal_fits_untruncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut g = goal_state::GoalState::new("fix it");
+        g.opened_at = Some("t+0s".to_string());
+        g.used_tokens = 42;
+        g.save(&session_dir).unwrap();
+
+        let root = Some(dir.path().to_path_buf());
+        // A wide pane: the short goal fits, no ellipsis.
+        let lines = build_row_lines(
+            &Some("s1".to_string()),
+            &None,
+            &root,
+            None,
+            None,
+            Some(200),
+        );
+        let text = lines[0].as_array().unwrap()[0].as_str().unwrap();
+        assert!(text.contains("fix it"), "{text}");
+        assert!(!text.contains("…"), "short goal stays whole: {text}");
+        assert!(text.contains("42"), "{text}");
+    }
+
+    #[test]
+    fn test_truncate_middle_keeps_head_and_tail() {
+        let s = "abcdefghij";
+        // max 6: head(2) + "…"(1) + tail(3) => "ab…hij" (total 6 chars)
+        assert_eq!(truncate_middle(s, 6), "ab…hij");
+        // max 8: head(3) + "…"(1) + tail(4) => "abc…ghij"
+        assert_eq!(truncate_middle(s, 8), "abc…ghij");
+        // max 10: fits, no truncation
+        assert_eq!(truncate_middle(s, 10), "abcdefghij");
+    }
+
+    #[test]
+    fn test_truncate_middle_short_string_unchanged() {
+        assert_eq!(truncate_middle("abc", 10), "abc");
+        assert_eq!(truncate_middle("abc", 3), "abc");
+    }
+
+    #[test]
+    fn test_truncate_middle_edge_budgets() {
+        // max_chars == 1: just the ellipsis.
+        assert_eq!(truncate_middle("abcdef", 1), "…");
+        // max_chars == 0: empty.
+        assert_eq!(truncate_middle("abcdef", 0), "");
+    }
+
+    #[test]
     fn test_row_lines_armed_hint_in_normal_mode() {
-        let lines = build_row_lines(&None, &None, &None, Some("start"), Some("[NORMAL]"));
+        let lines = build_row_lines(&None, &None, &None, Some("start"), Some("[NORMAL]"), None);
         assert_eq!(lines.len(), 1, "no goal file + armed: the hint line only");
         let text = lines[0].as_array().unwrap()[0].as_str().unwrap();
         assert!(text.contains("press i"), "normal mode names the key: {text}");
@@ -791,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_row_lines_armed_hint_in_insert_mode() {
-        let lines = build_row_lines(&None, &None, &None, Some("start"), Some("[INSERT]"));
+        let lines = build_row_lines(&None, &None, &None, Some("start"), Some("[INSERT]"), None);
         let text = lines[0].as_array().unwrap()[0].as_str().unwrap();
         assert!(text.contains("type your goal"), "{text}");
         assert!(!text.contains("press i"), "insert mode types directly: {text}");
@@ -799,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_row_lines_empty_when_no_goal_and_not_armed() {
-        let lines = build_row_lines(&None, &None, &None, None, None);
+        let lines = build_row_lines(&None, &None, &None, None, None, None);
         assert!(lines.is_empty(), "the host shows no row");
     }
 
@@ -821,10 +1081,158 @@ mod tests {
             &root,
             Some("edit"),
             Some("[NORMAL]"),
+            None,
         );
         assert_eq!(lines.len(), 1, "closed goal: no status line, hint only");
         let text = lines[0].as_array().unwrap()[0].as_str().unwrap();
         assert!(text.contains("goal armed"), "{text}");
         assert!(!text.contains("⚡"), "{text}");
+    }
+
+    #[test]
+    fn test_goal_status_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut g = goal_state::GoalState::new("ship the decoupling");
+        g.used_tokens = 12_400;
+        g.save(&session_dir).unwrap();
+
+        let session = Some("s1".to_string());
+        let root = Some(dir.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        let (ok, msg, arm) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        assert!(ok, "status query is informational: {msg}");
+        assert!(arm.is_none(), "status never arms a write");
+        assert!(msg.contains("active"), "status label: {msg}");
+        // No stray append op is emitted for a read-only query.
+        assert!(buf.is_empty(), "no append op: {buf:?}");
+    }
+
+    #[test]
+    fn test_goal_status_help_shows_full_content() {
+        let mut g = goal_state::GoalState::new(
+            "Ship a very long goal that runs far longer than the terminal width allows so the timer and token counter would wrap off screen",
+        );
+        g.id = "g-abcdef01".to_string();
+        g.used_tokens = 99_999;
+        let help = goal_status_help(&g, 154);
+        // Multi-line: status header + goal text on separate lines.
+        let lines: Vec<&str> = help.lines().collect();
+        assert!(lines[0].contains("active"), "first line has status: {help}");
+        assert!(lines[0].contains("g-abcdef01"), "goal id in header: {help}");
+        assert!(lines[0].contains("100.0k"), "token count in header: {help}");
+        // The full goal text is present, not truncated.
+        assert!(help.contains("Ship a very long goal"), "full goal text: {help}");
+        assert!(help.contains("wrap off screen"), "tail of goal text: {help}");
+        assert!(!help.contains("…"), "no truncation in preview: {help}");
+    }
+
+    #[test]
+    fn test_goal_status_help_blocked() {
+        let mut g = goal_state::GoalState::new("blocked goal");
+        g.mark_blocked("missing dependency");
+        let help = goal_status_help(&g, 300);
+        assert!(help.contains("blocked"), "status label: {help}");
+        assert!(help.contains("missing dependency"), "block reason: {help}");
+    }
+
+    #[test]
+    fn test_goal_status_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut g = goal_state::GoalState::new("paused goal");
+        g.active = false;
+        g.save(&session_dir).unwrap();
+
+        let session = Some("s1".to_string());
+        let root = Some(dir.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        assert!(ok, "status query is informational: {msg}");
+        assert!(msg.contains("paused"), "status label: {msg}");
+    }
+
+    #[test]
+    fn test_goal_status_no_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let session = Some("s1".to_string());
+        let root = Some(dir.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        assert!(ok, "no goal is a valid state, not an error: {msg}");
+        assert!(msg.contains("No goal"), "{msg}");
+    }
+
+    #[test]
+    fn test_goal_status_help_shape() {
+        let mut g = goal_state::GoalState::new("do the thing");
+        g.id = "g-abc12345".to_string();
+        g.used_tokens = 12_400;
+        let help = goal_status_help(&g, 154);
+        assert!(help.contains("g-abc12345"), "{help}");
+        assert!(help.contains("do the thing"), "{help}");
+        assert!(help.contains("12.4k"), "{help}");
+        // 154s == 2m 34s
+        assert!(help.contains("2m 34s"), "{help}");
+        // Is multi-line: status header + goal text on separate lines.
+        assert!(help.contains('\n'), "expected multi-line help: {help}");
+    }
+
+    #[test]
+    fn test_goal_elapsed_closed_uses_closed_at() {
+        let mut g = goal_state::GoalState::new("done");
+        g.opened_at = Some("t+100s".to_string());
+        g.mark_completed();
+        g.closed_at = Some("t+200s".to_string());
+        // For a closed goal the elapsed span is closed_at - opened_at = 200 - 100 = 100,
+        // independent of now.
+        assert_eq!(goal_elapsed(&g, 999_999), 100);
+    }
+
+    #[test]
+    fn test_goal_elapsed_active_uses_now() {
+        let mut g = goal_state::GoalState::new("running");
+        g.opened_at = Some("t+100s".to_string());
+        // Active goal: elapsed = now - opened_at (capped at 0)
+        assert_eq!(goal_elapsed(&g, 200), 100);
+        // now < opened_at clamps to 0
+        assert_eq!(goal_elapsed(&g, 50), 0);
+    }
+
+    #[test]
+    fn test_row_line_fits_content_area() {
+        use unicode_width::UnicodeWidthStr;
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut g = goal_state::GoalState::new(
+            "ship a very long goal description that would easily overflow the terminal width if not truncated properly by the row builder",
+        );
+        g.used_tokens = 10_800_000;
+        g.save(&session_dir).unwrap();
+
+        let terminal_width = 120usize;
+        let content_w = terminal_width - 2; // TUI insets 1 col each side
+
+        let session = Some("s1".to_string());
+        let root = Some(dir.path().to_path_buf());
+        let lines = build_row_lines(&session, &None, &root, None, None, Some(terminal_width));
+
+        assert!(!lines.is_empty(), "expected a goal row line");
+        let text = lines[0].as_array().unwrap()[0].as_str().unwrap().to_string();
+        let display_w = text.width();
+        assert!(
+            display_w <= content_w,
+            "row line display width {display_w} exceeds content area {content_w}: {text}"
+        );
+        assert!(
+            text.contains("10.8M"),
+            "token counter must remain visible: {text}"
+        );
     }
 }
