@@ -43,6 +43,9 @@
           wrapAsTool = { name, toolToml, built }:
             pkgs.stdenv.mkDerivation {
               pname = "${name}-tool";
+              # stdenv.mkDerivation computes `name` only when both `pname`
+              # and `version` are present, so pin a version here.
+              version = "0.1.0";
               nativeBuildInputs = [ built ];
               installPhase = ''
                 mkdir -p $out/${name}/bin
@@ -61,6 +64,9 @@
           wrapAsExt = { extName, extToml, built, binDir ? "target/release" }:
             pkgs.stdenv.mkDerivation {
               pname = "${extName}-ui-ext";
+              # stdenv.mkDerivation computes `name` only when both `pname`
+              # and `version` are present, so pin a version here.
+              version = "0.1.0";
               nativeBuildInputs = [ built ];
               installPhase = ''
                 mkdir -p $out/${extName}/${binDir}
