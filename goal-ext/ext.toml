@@ -30,15 +30,15 @@
 # extension installed, the bare TUI shows no such row (the TUI has
 # no goal-state dependency).
 #
-# Build: `cargo build` in this directory. The package is standalone
-# (not a member of the root workspace); the binary lands in
-# ./target/debug/goal-ext. The manifest addresses it by a path
+# Build: `cargo build --release` in this directory. The package is
+# standalone (not a member of the root workspace); the binary lands in
+# ./target/release/goal-ext. The manifest addresses it by a path
 # relative to its own entry; the host resolves that against the entry
 # directory (docs/ui-extension.md section 6), so no `PATH` export is
 # required for the global layer.
 
 [ext]
-command = "target/debug/goal-ext"
+command = "target/release/goal-ext"
 caps = ["commands", "append", "row"]
 append_types = ["ext_status"]
 kinds = ["user_message"]
