@@ -39,6 +39,11 @@
               # to the build root so cargoInstallHook finds it.
               src = "${self}";
               buildAndTestSubdir = crateDir;
+              # The lockfile validation (cargoSetupPostPatchHook) expects
+              # Cargo.lock at $sourceRoot/${cargoRoot}/Cargo.lock. The
+              # per-crate lock lives in the crate subdir, so point
+              # cargoRoot there to match the vendor dir's lock.
+              cargoRoot = crateDir;
               nativeBuildInputs = [ rustToolchain ];
               cargoLock = { lockFile = "${self}/${crateDir}/Cargo.lock"; };
               doCheck = false;
