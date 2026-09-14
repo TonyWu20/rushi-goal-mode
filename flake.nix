@@ -33,7 +33,12 @@
             pkgs.rustPlatform.buildRustPackage {
               pname = crateName;
               version = "0.1.0";
-              src = "${self}/${crateDir}";
+              # Use the whole repo as src so intra-repo path deps
+              # (e.g. goal-state) resolve. buildAndTestSubdir cd's into
+              # the crate before cargo runs, and sets CARGO_TARGET_DIR
+              # to the build root so cargoInstallHook finds it.
+              src = "${self}";
+              buildAndTestSubdir = crateDir;
               nativeBuildInputs = [ rustToolchain ];
               cargoLock = { lockFile = "${self}/${crateDir}/Cargo.lock"; };
               doCheck = false;
