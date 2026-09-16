@@ -50,6 +50,9 @@
             };
 
           # ── Tool wrapper: $out/<name>/tool.toml + <name>/bin/<binary> ──
+          # `meta.rushi.entry` (rushi#13) records the tool entry dir this
+          # package provides. lib.mkRushi reads it at eval time to derive
+          # the consumer's [paths] extension_tool_paths (declare-once).
           wrapAsTool = { name, toolToml, built }:
             pkgs.stdenv.mkDerivation {
               pname = "${name}-tool";
@@ -61,6 +64,7 @@
                 cp -rL ${built}/bin/. $out/${name}/bin/
                 cp ${toolToml} $out/${name}/tool.toml
               '';
+              meta = { rushi = { entry = name; }; };
             };
 
           # ── UI-ext wrapper: $out/<ext>/ext.toml + <ext>/<binDir>/<bin> ──
@@ -81,6 +85,10 @@
                 cp ${extToml} $out/${extName}/ext.toml
                 cp -rL ${built}/bin/. $out/${extName}/${binDir}/
               '';
+              # meta.rushi.ext (rushi#13): the UI-ext entry dir this
+              # package provides. lib.mkRushi reads it at eval time to
+              # derive the manifest [ui_extensions] enabled list.
+              meta = { rushi = { ext = extName; }; };
             };
         in
         # Per-system package attrset.
@@ -90,14 +98,36 @@
           goal-blocked  = wrapAsTool { name = "goal_blocked";  toolToml = "${self}/goal-tools/goal_blocked/tool.toml";  built = buildCrate { crateDir = "goal-tools/goal_blocked";  crateName = "goal_blocked"; }; };
           goal-complete = wrapAsTool { name = "goal_complete"; toolToml = "${self}/goal-tools/goal_complete/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal_complete"; crateName = "goal_complete"; }; };
 
+          # Tag a hook package with meta.rushi.bin (rushi#13): the runtime
+          # binary name (the crate's [[bin]] name, from its Cargo.toml), so
+          # lib.mkRushi can derive / drift-guard hook commands at eval time.
+          # Merges onto the package so any existing meta is preserved.
+          tagHook = { pkg, bin }:
+            pkg // { meta = (pkg.meta or { }) // { rushi = { inherit bin; }; }; };
+
           # ── Hooks (a bare buildRustPackage result IS the hook source) ──
           # Binary names (harness-hook-*) come from each Cargo.toml [[bin]] name;
           # they must match the `command` in config.toml [hooks].
-          hook-goal-idle     = buildCrate { crateDir = "goal-hooks/hook-goal-idle";     crateName = "hook-goal-idle"; };
-          hook-goal-compact  = buildCrate { crateDir = "goal-hooks/hook-goal-compact";  crateName = "hook-goal-compact"; };
-          hook-goal-tools    = buildCrate { crateDir = "goal-hooks/hook-goal-tools";    crateName = "hook-goal-tools"; };
-          hook-goal-arm      = buildCrate { crateDir = "goal-hooks/hook-goal-arm";      crateName = "hook-goal-arm"; };
-          hook-goal-tokens   = buildCrate { crateDir = "goal-hooks/hook-goal-tokens";   crateName = "hook-goal-tokens"; };
+          hook-goal-idle = tagHook {
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-idle";     crateName = "hook-goal-idle"; };
+            bin = "harness-hook-goal-idle";
+          };
+          hook-goal-compact = tagHook {
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-compact";  crateName = "hook-goal-compact"; };
+            bin = "harness-hook-goal-compact";
+          };
+          hook-goal-tools = tagHook {
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tools";    crateName = "hook-goal-tools"; };
+            bin = "harness-hook-goal-tools";
+          };
+          hook-goal-arm = tagHook {
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-arm";      crateName = "hook-goal-arm"; };
+            bin = "harness-hook-goal-arm";
+          };
+          hook-goal-tokens = tagHook {
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tokens";   crateName = "hook-goal-tokens"; };
+            bin = "harness-hook-goal-tokens";
+          };
 
           # ── UI extension (wrap into the ext contract) ──
           # extName "goal" matches the ui_extensions/goal entry name.
