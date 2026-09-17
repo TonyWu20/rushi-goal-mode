@@ -2,3 +2,4 @@ target/
 goal-ext/goal-ext
 .direnv
 .envrc
+sessions/
