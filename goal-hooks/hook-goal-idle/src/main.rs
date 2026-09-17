@@ -13,6 +13,15 @@
 //!   - `goal_blocked` closes the goal
 //!   - `goal pause` / `goal clear` (TUI) stop the loop
 //!
+//! Refire guarantee (rushi-goal-mode issue #1): this hook never
+//! requests a silent `refire` (kernel issue #6). A refire re-runs the
+//! model with no new user message, which after `goal_complete` produced
+//! wasted turns and a false user-confirmation that leaked into the
+//! transcript. A goal in a terminal state (completed, blocked, or
+//! paused) therefore yields *no decision* so the loop stops cleanly.
+//! An open goal gets a logged continuation (`user_message`), which is
+//! the goal-mode mechanism for keeping the loop alive.
+//!
 //! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
 //! - exit 0 + `{}` → no decision, the loop stops (window default)
 //! - exit 0 + `{"decision":"continue","payload":{"message":"..."}}`
@@ -68,10 +77,11 @@ fn main() {
         goal.used_tokens = total;
     }
 
-    // A completed, blocked, or paused goal stops the loop.
+    // A completed, blocked, or paused goal stops the loop (issue #1):
+    // terminal goals get no decision and never request a refire.
     if !goal.is_open() {
         let _ = goal.save(&session_dir);
-        println!("{{}}");
+        println!("{}", idle_decision(&goal));
         return;
     }
 
@@ -82,14 +92,35 @@ fn main() {
 
     let _ = goal.save(&session_dir);
 
-    let prompt = goal.build_continue_prompt();
-    let resp = serde_json::json!({
-        "decision": "continue",
-        "payload": {
-            "message": prompt,
-        },
-    });
-    println!("{}", resp);
+    println!("{}", idle_decision(&goal));
+}
+
+/// The `run.idle` decision, computed from the goal state alone.
+///
+/// Issue #1: this is a pure function of the goal's state so the
+/// terminal-state gate is explicit and testable.
+///
+/// - **Terminal goal** (completed, blocked, or paused): returns `{}`
+///   (no decision). The kernel stops the loop and runs no further model
+///   turns. In particular the goal extension never requests a silent
+///   `refire`: a refire after `goal_complete`/`goal_blocked` would
+///   re-run the model with no new user message, wasting a call and
+///   risking a false user-confirmation in the transcript.
+/// - **Open goal**: returns a `continue` decision carrying a logged
+///   continuation `message`. The kernel appends it as a `user_message`,
+///   which keeps the goal progressing and is traceable in the log.
+///   No `refire` payload is emitted.
+fn idle_decision(goal: &GoalState) -> serde_json::Value {
+    if goal.is_open() {
+        serde_json::json!({
+            "decision": "continue",
+            "payload": {
+                "message": goal.build_continue_prompt(),
+            },
+        })
+    } else {
+        serde_json::json!({})
+    }
 }
 
 fn read_stdin_json() -> serde_json::Value {
@@ -225,5 +256,65 @@ mod tests {
             "closed goal should still record cumulative tokens"
         );
         assert!(reloaded.completed);
+    }
+
+    // ── issue #1: terminal goals must not refire or continue ──
+
+    /// A completed goal yields no decision: the loop stops and the
+    /// kernel runs no further model turns. No `refire` is requested.
+    #[test]
+    fn issue1_completed_goal_yields_no_decision() {
+        let mut g = GoalState::new("done");
+        g.mark_completed();
+        let d = idle_decision(&g);
+        assert_eq!(d, serde_json::json!({}), "completed goal must stop: {d}");
+        assert!(
+            d.get("refire").is_none(),
+            "completed goal must not request a refire: {d}"
+        );
+    }
+
+    /// A blocked goal yields no decision: same stop-and-no-refire
+    /// guarantee as a completed goal.
+    #[test]
+    fn issue1_blocked_goal_yields_no_decision() {
+        let mut g = GoalState::new("stuck");
+        g.mark_blocked("missing dependency");
+        let d = idle_decision(&g);
+        assert_eq!(d, serde_json::json!({}), "blocked goal must stop: {d}");
+        assert!(
+            d.get("refire").is_none(),
+            "blocked goal must not request a refire: {d}"
+        );
+    }
+
+    /// A paused goal (active == false) also stops, with no refire.
+    #[test]
+    fn issue1_paused_goal_yields_no_decision() {
+        let mut g = GoalState::new("paused");
+        g.active = false;
+        let d = idle_decision(&g);
+        assert_eq!(d, serde_json::json!({}), "paused goal must stop: {d}");
+    }
+
+    /// An open goal continues with a *logged* continuation message and
+    /// never requests a silent refire (issue #1: the goal extension
+    /// must not request refires it does not need).
+    #[test]
+    fn issue1_open_goal_continues_without_refire() {
+        let mut g = GoalState::new("keep working");
+        g.iteration = 3;
+        // main() increments the counter before computing the decision.
+        g.iteration += 1;
+        let d = idle_decision(&g);
+        assert_eq!(d["decision"], "continue");
+        let msg = d["payload"]["message"].as_str().unwrap();
+        assert!(msg.contains("continuation #4"), "{msg}");
+        assert!(msg.contains("keep working"), "{msg}");
+        // The critical guarantee: no silent refire.
+        assert!(
+            d["payload"].get("refire").is_none(),
+            "open goal must continue via a logged message, not a refire: {d}"
+        );
     }
 }
