@@ -114,7 +114,12 @@ fn main() {
     let stdout = std::io::stdout();
     let mut out = std::io::LineWriter::new(stdout.lock());
 
-    // Resolve the sessions root once at startup from CONFIG.
+    // Resolve the sessions root once at startup.
+    //
+    // CONFIG names the config file; the base dir for a relative
+    // sessions root is RUSHI_CWD when the TUI host spawned us (the
+    // same dir the kernel resolves session paths against), else the
+    // config file's own directory (a bare dev run with no host).
     let sessions_root = std::env::var("CONFIG").ok().and_then(|c| {
         sessions_root(std::path::Path::new(&c))
     });
@@ -730,12 +735,29 @@ fn format_duration(secs: i64) -> String {
 }
 
 /// Read `[paths] sessions_root` from the config file named by the
-/// `CONFIG` env var. Returns the sessions root resolved against the
-/// config directory. Defaults to `<config_dir>/sessions` when absent.
+/// `CONFIG` env var. Returns the sessions root. A relative value (the
+/// common case, e.g. "sessions") resolves against `RUSHI_CWD` when
+/// the TUI host exported it, else against the config file's directory.
+/// Under a Nix build the config file lives in the read-only store, so
+/// basing relative roots on its directory would point session files
+/// at a path the extension cannot write to; `RUSHI_CWD` is the
+/// directory the user launched the harness from — the same base the
+/// kernel uses for its session dirs. Absolute values are used as-is;
+/// a missing key defaults to `<base>/sessions`.
 fn sessions_root(config_path: &std::path::Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(config_path).ok()?;
     let v: toml::Value = text.parse().ok()?;
     let config_dir = config_path.parent()?.to_path_buf();
+    // The host-cwd protocol: the TUI host exports RUSHI_CWD, the
+    // directory the user launched the harness from. The kernel
+    // resolves a relative `sessions_root` against the loop cwd (that
+    // same directory), so the ext must base relative session paths on
+    // it too. A bare dev run exports no RUSHI_CWD; there the config
+    // dir is the correct base.
+    let base_dir = std::env::var_os("RUSHI_CWD")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(config_dir);
     if let Some(root) = v
         .get("paths")
         .and_then(|p| p.get("sessions_root"))
@@ -745,10 +767,10 @@ fn sessions_root(config_path: &std::path::Path) -> Option<PathBuf> {
         return Some(if p.is_absolute() {
             p.to_path_buf()
         } else {
-            config_dir.join(p)
+            base_dir.join(p)
         });
     }
-    Some(config_dir.join("sessions"))
+    Some(base_dir.join("sessions"))
 }
 
 /// Append an `ext_status` event to the session log via the
