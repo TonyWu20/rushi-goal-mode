@@ -21,6 +21,12 @@
 //! `commands_list`. An `invoke` op (the user committed a palette item)
 //! is executed, then replying with an `invoke_reply`.
 //!
+//! Session dir resolution (rushi-tui#14): session-carrying ops
+//! (commands, invoke, event) may carry a host-resolved absolute
+//! `session_dir`. When present it is used directly; when absent the
+//! extension falls back to deriving `<sessions_root>/<session>` from
+//! the startup CONFIG + RUSHI_CWD resolution.
+//!
 //! Event-driven goal setting (§1.1, §1.8):
 //! When the user selects `goal` or `goal_edit` from the palette, the
 //! extension sets an in-memory `armed` flag. The next `user_message`
@@ -77,6 +83,12 @@ struct Op {
     value: Option<String>,
     #[serde(default)]
     session: Option<String>,
+    /// The host-resolved absolute session directory (rushi-tui#14). The
+    /// host sends this on session-carrying ops (commands, invoke, event).
+    /// When present it takes precedence over deriving the directory from
+    /// the startup-resolved `sessions_root` + `session` name.
+    #[serde(default)]
+    session_dir: Option<String>,
     /// The full log event object, forwarded when the op type is `event`
     /// and the event's type matches the extension's `kinds` filter.
     #[serde(default)]
@@ -152,10 +164,16 @@ fn main() {
                 // help text as multi-line, scrollable content in the
                 // float (docs/tui-command-palette.md section 11): the
                 // workaround for the width-truncated row line.
+                //
+                // Prefer the host-provided `session_dir` (rushi-tui#14)
+                // over deriving the dir from the startup `sessions_root`.
                 let goal_status_help =
-                    if let (Some(sess), Some(root)) = (&session, &sessions_root) {
-                        let session_dir = root.join(sess);
-                        match goal_state::GoalState::load(&session_dir) {
+                    match resolve_session_dir(
+                        op.session_dir.as_deref(),
+                        &session,
+                        &sessions_root,
+                    ) {
+                        Some(session_dir) => match goal_state::GoalState::load(&session_dir) {
                             Some(g) => {
                                 let elapsed = goal_elapsed(&g, ts_now_secs());
                                 goal_status_help(&g, elapsed)
@@ -164,10 +182,11 @@ fn main() {
                                 "No goal in this session.\nUse 'goal' to start one."
                                     .to_string()
                             }
+                        },
+                        None => {
+                            "No active session or sessions root available."
+                                .to_string()
                         }
-                    } else {
-                        "No active session or sessions root available."
-                            .to_string()
                     };
                 let reply = json!({
                     "v": 1,
@@ -243,13 +262,13 @@ fn main() {
                     // Not armed: ignore the event.
                     continue;
                 };
-                let Some(sess) = &session else {
+                // Prefer the host-provided session_dir (rushi-tui#14);
+                // fall back to sessions_root + session for older hosts.
+                let Some(session_dir) =
+                    resolve_session_dir(op.session_dir.as_deref(), &session, &sessions_root)
+                else {
                     continue;
                 };
-                let Some(root) = &sessions_root else {
-                    continue;
-                };
-                let session_dir = root.join(sess);
                 let content = event_obj
                     .get("content")
                     .and_then(|c| c.as_str())
@@ -290,6 +309,7 @@ fn main() {
                     op.value.as_deref(),
                     &session,
                     &sessions_root,
+                    op.session_dir.as_deref(),
                     &mut out,
                 );
                 // `goal` / `goal_edit` arm event-driven goal writing:
@@ -339,24 +359,28 @@ fn main() {
 /// `arm_mode` is `Some("start")` or `Some("edit")` when the command
 /// arms event-driven goal writing (the next `user_message` event will
 /// create or edit `goal.json`).
+///
+/// `host_session_dir` is the host-resolved absolute session directory
+/// (rushi-tui#14). When present it takes precedence over deriving the
+/// directory from `sessions_root` + `session`.
 fn handle_invoke<W: Write>(
     id: &str,
     _value: Option<&str>,
     session: &Option<String>,
     sessions_root: &Option<PathBuf>,
+    host_session_dir: Option<&str>,
     out: &mut W,
 ) -> (bool, String, Option<String>) {
-    let Some(sess) = session else {
-        return (
-            false,
-            "no active session: open the palette first so the host reports the session".to_string(),
-            None,
-        );
+    let Some(session_dir) =
+        resolve_session_dir(host_session_dir, session, sessions_root)
+    else {
+        let msg = if session.is_none() {
+            "no active session: open the palette first so the host reports the session".to_string()
+        } else {
+            "cannot resolve sessions root from CONFIG".to_string()
+        };
+        return (false, msg, None);
     };
-    let Some(root) = sessions_root else {
-        return (false, "cannot resolve sessions root from CONFIG".to_string(), None);
-    };
-    let session_dir = root.join(sess);
 
     match id {
         "goal" => {
@@ -734,6 +758,27 @@ fn format_duration(secs: i64) -> String {
     }
 }
 
+/// Resolve the session directory for a single op. Prefer the
+/// host-provided `host_session_dir` (rushi-tui#14: the host hands a
+/// pre-resolved absolute session dir on session-carrying ops). When
+/// absent, fall back to the startup-resolved `sessions_root` joined
+/// with the session name — the path older hosts (pre-#14) use.
+fn resolve_session_dir(
+    host_session_dir: Option<&str>,
+    session: &Option<String>,
+    sessions_root: &Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(dir) = host_session_dir {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    match (session, sessions_root) {
+        (Some(sess), Some(root)) => Some(root.join(sess)),
+        _ => None,
+    }
+}
+
 /// Read `[paths] sessions_root` from the config file named by the
 /// `CONFIG` env var. Returns the sessions root. A relative value (the
 /// common case, e.g. "sessions") resolves against `RUSHI_CWD` when
@@ -797,8 +842,10 @@ fn append_ext_status<W: Write>(out: &mut W, session_dir: &std::path::Path, id: &
 #[cfg(test)]
 mod tests {
     use crate::{
-        build_row_lines, goal_elapsed, goal_status_help, handle_invoke, truncate_middle,
+        build_row_lines, goal_elapsed, goal_status_help, handle_invoke, resolve_session_dir,
+        truncate_middle,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn test_goal_pause() {
@@ -886,6 +933,7 @@ mod tests {
             None,
             &session,
             &root,
+            None,
             &mut buf,
         );
         assert!(ok, "resuming a blocked goal should succeed: {msg}");
@@ -915,6 +963,7 @@ mod tests {
             None,
             &session,
             &root,
+            None,
             &mut buf,
         );
         assert!(!ok, "resuming a completed goal must fail");
@@ -939,6 +988,7 @@ mod tests {
             None,
             &session,
             &root,
+            None,
             &mut buf,
         );
         assert!(!ok, "resuming a paused goal must fail");
@@ -1123,7 +1173,7 @@ mod tests {
         let session = Some("s1".to_string());
         let root = Some(dir.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
-        let (ok, msg, arm) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        let (ok, msg, arm) = handle_invoke("goal_status", None, &session, &root, None, &mut buf);
         assert!(ok, "status query is informational: {msg}");
         assert!(arm.is_none(), "status never arms a write");
         assert!(msg.contains("active"), "status label: {msg}");
@@ -1171,7 +1221,7 @@ mod tests {
         let session = Some("s1".to_string());
         let root = Some(dir.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
-        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, None, &mut buf);
         assert!(ok, "status query is informational: {msg}");
         assert!(msg.contains("paused"), "status label: {msg}");
     }
@@ -1185,7 +1235,7 @@ mod tests {
         let session = Some("s1".to_string());
         let root = Some(dir.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
-        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, &mut buf);
+        let (ok, msg, _) = handle_invoke("goal_status", None, &session, &root, None, &mut buf);
         assert!(ok, "no goal is a valid state, not an error: {msg}");
         assert!(msg.contains("No goal"), "{msg}");
     }
@@ -1256,5 +1306,72 @@ mod tests {
             text.contains("10.8M"),
             "token counter must remain visible: {text}"
         );
+    }
+
+    // --- session_dir (rushi-tui#14) tests ---
+
+    #[test]
+    fn test_resolve_session_dir_host_dir_takes_precedence() {
+        // host_session_dir present: used directly, root and session ignored.
+        let root = Some(PathBuf::from("/root/sessions"));
+        let session = Some("abc".to_string());
+        let dir = resolve_session_dir(
+            Some("/nix/store/xyz/sessions/abc"),
+            &session,
+            &root,
+        );
+        assert_eq!(dir, Some(PathBuf::from("/nix/store/xyz/sessions/abc")));
+    }
+
+    #[test]
+    fn test_resolve_session_dir_falls_back_to_root_join() {
+        // No host_session_dir: fall back to root.join(session).
+        let root = Some(PathBuf::from("/home/u/sessions"));
+        let session = Some("s42".to_string());
+        let dir = resolve_session_dir(None, &session, &root);
+        assert_eq!(dir, Some(PathBuf::from("/home/u/sessions/s42")));
+    }
+
+    #[test]
+    fn test_resolve_session_dir_none_when_missing() {
+        // No host_session_dir, no session, no root: None.
+        let dir = resolve_session_dir(None, &None, &None);
+        assert!(dir.is_none());
+        // Empty host_session_dir is treated as absent, still falls back.
+        let root = Some(PathBuf::from("/x"));
+        let session = Some("s".to_string());
+        let dir = resolve_session_dir(Some(""), &session, &root);
+        assert_eq!(dir, Some(PathBuf::from("/x/s")));
+    }
+
+    #[test]
+    fn test_handle_invoke_uses_host_session_dir() {
+        // The host-provided session_dir is used even when it differs from
+        // what sessions_root + session would produce.
+        let dir = tempfile::tempdir().unwrap();
+        let host_dir = dir.path().join("host-resolved");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let mut g = goal_state::GoalState::new("host dir goal");
+        g.mark_blocked("missing dep");
+        g.save(&host_dir).unwrap();
+
+        let session = Some("s1".to_string());
+        // root points somewhere else entirely — the fallback would miss.
+        let root = Some(dir.path().join("unused-fallback-root"));
+        let mut buf: Vec<u8> = Vec::new();
+
+        let (ok, msg, _) = handle_invoke(
+            "goal_resume",
+            None,
+            &session,
+            &root,
+            Some(host_dir.to_str().unwrap()),
+            &mut buf,
+        );
+        assert!(ok, "host session_dir should let resume succeed: {msg}");
+        assert!(msg.contains("resumed"), "{msg}");
+
+        let reloaded = goal_state::GoalState::load(&host_dir).unwrap();
+        assert!(reloaded.is_open());
     }
 }
