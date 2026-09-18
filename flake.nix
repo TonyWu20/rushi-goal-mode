@@ -11,7 +11,7 @@
 
   outputs = { self, nixpkgs, fenix }:
     let
-      supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       pkgLib = nixpkgs.lib;
 
       buildFor = system:
@@ -21,7 +21,12 @@
             overlays = [ fenix.overlays.default ];
           };
           rustToolchain = fenix.packages.${system}.stable.withComponents [
-            "cargo" "clippy" "rust-src" "rustc" "rustfmt" "rust-analyzer"
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+            "rust-analyzer"
           ];
 
           # Build one standalone cargo crate from a subpath of this flake's
@@ -94,8 +99,8 @@
         # Per-system package attrset.
         rec {
           # ── Tools (wrap the cargo build into the tool contract) ──
-          goal          = wrapAsTool { name = "goal";          toolToml = "${self}/goal-tools/goal/tool.toml";          built = buildCrate { crateDir = "goal-tools/goal";         crateName = "goal"; }; };
-          goal-blocked  = wrapAsTool { name = "goal_blocked";  toolToml = "${self}/goal-tools/goal_blocked/tool.toml";  built = buildCrate { crateDir = "goal-tools/goal_blocked";  crateName = "goal_blocked"; }; };
+          goal = wrapAsTool { name = "goal"; toolToml = "${self}/goal-tools/goal/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal"; crateName = "goal"; }; };
+          goal-blocked = wrapAsTool { name = "goal_blocked"; toolToml = "${self}/goal-tools/goal_blocked/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal_blocked"; crateName = "goal_blocked"; }; };
           goal-complete = wrapAsTool { name = "goal_complete"; toolToml = "${self}/goal-tools/goal_complete/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal_complete"; crateName = "goal_complete"; }; };
 
           # Tag a hook package with meta.rushi.bin (rushi#13): the runtime
@@ -109,23 +114,23 @@
           # Binary names (harness-hook-*) come from each Cargo.toml [[bin]] name;
           # they must match the `command` in config.toml [hooks].
           hook-goal-idle = tagHook {
-            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-idle";     crateName = "hook-goal-idle"; };
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-idle"; crateName = "hook-goal-idle"; };
             bin = "harness-hook-goal-idle";
           };
           hook-goal-compact = tagHook {
-            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-compact";  crateName = "hook-goal-compact"; };
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-compact"; crateName = "hook-goal-compact"; };
             bin = "harness-hook-goal-compact";
           };
           hook-goal-tools = tagHook {
-            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tools";    crateName = "hook-goal-tools"; };
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tools"; crateName = "hook-goal-tools"; };
             bin = "harness-hook-goal-tools";
           };
           hook-goal-arm = tagHook {
-            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-arm";      crateName = "hook-goal-arm"; };
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-arm"; crateName = "hook-goal-arm"; };
             bin = "harness-hook-goal-arm";
           };
           hook-goal-tokens = tagHook {
-            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tokens";   crateName = "hook-goal-tokens"; };
+            pkg = buildCrate { crateDir = "goal-hooks/hook-goal-tokens"; crateName = "hook-goal-tokens"; };
             bin = "harness-hook-goal-tokens";
           };
 
@@ -156,7 +161,12 @@
             overlays = [ fenix.overlays.default ];
           };
           rustToolchain = fenix.packages.${system}.stable.withComponents [
-            "cargo" "clippy" "rust-src" "rustc" "rustfmt" "rust-analyzer"
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+            "rust-analyzer"
           ];
         in
         {
