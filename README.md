@@ -11,7 +11,8 @@ This repo contains the four pieces that form one capability:
 | `goal-tools/` | Three loop tools: `goal`, `goal_complete`, `goal_blocked` | kernel `[paths] extra_tools_roots` |
 | `goal-ext/` | TUI extension: command palette + row slot | TUI `[ext] dir` (via the `ui_extensions/goal` symlink) |
 
-All four depend on `goal-state` via a local path dep. No crate in this repo
+All four depend on `rushi-goal-state` (the `goal-state/` directory) via a
+local path dep. No crate in this repo
 depends on anything outside this repo.
 
 ## Build
@@ -20,7 +21,7 @@ Each sub-directory is a standalone cargo package with an empty `[workspace]`
 table. Build them all in one shot:
 
 ```sh
-cargo build -p goal-state \
+cargo build -p rushi-goal-state \
   -p hook-goal-arm -p hook-goal-compact -p hook-goal-idle -p hook-goal-tools \
   -p goal -p goal_complete -p goal_blocked \
   -p goal-ext
@@ -51,8 +52,8 @@ layer.
 ## Repo boundaries
 
 - This repo is self-contained: no path deps outside the kernel.
-- `goal-state` is the single source of truth for the goal JSON schema
+- `rushi-goal-state` (the `goal-state/` directory) is the single source of truth for the goal JSON schema
   and lives in this repo (it left the kernel at the split). The hooks,
   tools, and ext all read/write the same file through it.
-- The kernel repo (`rust-unix-harness`) no longer carries `goal-state`;
-  it only knows the hook binary names and tool manifests.
+- The kernel repo (`rust-unix-harness`) no longer carries `rushi-goal-state`.
+  It only knows the hook binary names and tool manifests.

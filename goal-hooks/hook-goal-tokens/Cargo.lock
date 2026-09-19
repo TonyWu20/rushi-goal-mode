@@ -42,18 +42,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "goal-state"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hook-goal-tokens"
 version = "0.1.0"
 dependencies = [
- "goal-state",
+ "rushi-goal-state",
  "serde_json",
  "tempfile",
 ]
@@ -111,6 +103,14 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rushi-goal-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rustix"

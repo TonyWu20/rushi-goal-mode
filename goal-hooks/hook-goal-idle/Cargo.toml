@@ -27,7 +27,7 @@ name = "harness-hook-goal-idle"
 path = "src/main.rs"
 
 [dependencies]
-goal-state = { path = "../../goal-state" }
+rushi-goal-state = { path = "../../goal-state" }
 serde_json = "1.0"
 
 [dev-dependencies]

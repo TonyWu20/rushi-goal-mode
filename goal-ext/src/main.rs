@@ -11,7 +11,7 @@
 //!   - the "goal armed" hint while a goal write/edit is pending
 //!     (worded for the current editor mode),
 //!   - nothing otherwise (the host shows no row).
-//! The bare TUI has no goal-state dependency: without this
+//! The bare TUI has no rushi-goal-state dependency: without this
 //! extension installed, the host has no row owner and renders no
 //! goal row at all.
 //!
@@ -116,7 +116,7 @@ fn ts_now_secs() -> i64 {
 }
 
 /// RFC 3339-ish timestamp without a chrono dependency: `t+<epoch-seconds>s`.
-/// Matches the convention used by `goal-state`.
+/// Matches the convention used by `rushi-goal-state`.
 fn ts_now() -> String {
     format!("t+{}s", ts_now_secs())
 }
@@ -173,7 +173,7 @@ fn main() {
                         &session,
                         &sessions_root,
                     ) {
-                        Some(session_dir) => match goal_state::GoalState::load(&session_dir) {
+                        Some(session_dir) => match rushi_goal_state::GoalState::load(&session_dir) {
                             Some(g) => {
                                 let elapsed = goal_elapsed(&g, ts_now_secs());
                                 goal_status_help(&g, elapsed)
@@ -280,13 +280,13 @@ fn main() {
                 }
                 match mode.as_str() {
                     "start" => {
-                        let state = goal_state::GoalState::new(&content);
+                        let state = rushi_goal_state::GoalState::new(&content);
                         if state.save(&session_dir).is_ok() {
                             append_ext_status(&mut out, &session_dir, "goal_set", "start");
                         }
                     }
                     "edit" => {
-                        if let Some(mut state) = goal_state::GoalState::load(&session_dir) {
+                        if let Some(mut state) = rushi_goal_state::GoalState::load(&session_dir) {
                             state.edit_goal(&content);
                             if state.save(&session_dir).is_ok() {
                                 append_ext_status(&mut out, &session_dir, "goal_edited", "edit");
@@ -386,7 +386,7 @@ fn handle_invoke<W: Write>(
         "goal" => {
             // A start requires no open goal: an open goal is edited via
             // `goal_edit` or, when closed, re-opened via `goal_resume`.
-            if let Some(g) = goal_state::GoalState::load(&session_dir) {
+            if let Some(g) = rushi_goal_state::GoalState::load(&session_dir) {
                 if g.is_open() {
                     return (
                         false,
@@ -410,7 +410,7 @@ fn handle_invoke<W: Write>(
         }
         "goal_edit" => {
             // Verify a goal exists before arming edit mode.
-            match goal_state::GoalState::load(&session_dir) {
+            match rushi_goal_state::GoalState::load(&session_dir) {
                 Some(g) if g.is_open() => (
                     true,
                     format!(
@@ -435,7 +435,7 @@ fn handle_invoke<W: Write>(
             }
         }
         "goal_pause" => {
-            let Some(mut g) = goal_state::GoalState::load(&session_dir) else {
+            let Some(mut g) = rushi_goal_state::GoalState::load(&session_dir) else {
                 return (false, "No goal found in this session.".to_string(), None);
             };
             if !g.is_open() {
@@ -462,13 +462,13 @@ fn handle_invoke<W: Write>(
             }
         }
         "goal_clear" => {
-            let path = goal_state::GoalState::path(&session_dir);
+            let path = rushi_goal_state::GoalState::path(&session_dir);
             if !path.exists() {
                 return (false, "No goal.json found — nothing to clear.".to_string(), None);
             }
             // Only the pointer is deleted; the per-goal files
             // (goal-<id>.json) stay as traces of the session's goals.
-            match goal_state::GoalState::clear(&session_dir) {
+            match rushi_goal_state::GoalState::clear(&session_dir) {
                 true => {
                     append_ext_status(out, &session_dir, "goal_cleared", "clear");
                     (
@@ -481,7 +481,7 @@ fn handle_invoke<W: Write>(
             }
         }
         "goal_resume" => {
-            let Some(mut g) = goal_state::GoalState::load(&session_dir) else {
+            let Some(mut g) = rushi_goal_state::GoalState::load(&session_dir) else {
                 return (
                     false,
                     "No goal found in this session. Use 'goal' to start one.".to_string(),
@@ -529,7 +529,7 @@ fn handle_invoke<W: Write>(
             // rendered by the TUI float). The invoke is a brief
             // confirmation; the user already sees the content while
             // the palette is open.
-            let Some(g) = goal_state::GoalState::load(&session_dir) else {
+            let Some(g) = rushi_goal_state::GoalState::load(&session_dir) else {
                 return (true, "No goal in this session.".to_string(), None);
             };
             let status = if g.is_open() { "active" } else if g.blocked { "blocked" } else if g.completed { "completed" } else { "paused" };
@@ -543,7 +543,7 @@ fn handle_invoke<W: Write>(
 /// since the goal opened. A closed goal (blocked or completed) reports
 /// the span from `opened_at` to `closed_at`; an open or paused goal
 /// reports now minus `opened_at`.
-fn goal_elapsed(g: &goal_state::GoalState, now_secs: i64) -> i64 {
+fn goal_elapsed(g: &rushi_goal_state::GoalState, now_secs: i64) -> i64 {
     let opened = parse_ts_secs(g.opened_at.as_deref()).unwrap_or(0);
     let end = if g.blocked || g.completed {
         parse_ts_secs(g.closed_at.as_deref()).unwrap_or(now_secs)
@@ -568,7 +568,7 @@ fn parse_ts_secs(ts: Option<&str>) -> Option<i64> {
 /// the palette, highlights `goal status`, and the preview pane shows
 /// the full goal content, status, elapsed time, token count, and
 /// block reason — scrollable and never truncated by terminal width.
-fn goal_status_help(g: &goal_state::GoalState, elapsed: i64) -> String {
+fn goal_status_help(g: &rushi_goal_state::GoalState, elapsed: i64) -> String {
     let status = if g.is_open() {
         "active"
     } else if g.blocked {
@@ -626,10 +626,10 @@ fn build_row_lines(
     let sess = op_session.as_ref().or(remembered_session.as_ref());
     if let (Some(sess), Some(root)) = (sess, sessions_root) {
         let session_dir = root.join(sess);
-        if let Some(g) = goal_state::GoalState::load(&session_dir) {
+        if let Some(g) = rushi_goal_state::GoalState::load(&session_dir) {
             if g.is_open() {
                 // Elapsed since the goal opened: `opened_at` is the
-                // `t+<secs>s` convention shared with goal-state.
+                // `t+<secs>s` convention shared with rushi-goal-state.
                 let now_secs = ts_now_secs();
                 let elapsed = goal_elapsed(&g, now_secs);
                 let dur_str = format_duration(elapsed);
@@ -851,16 +851,16 @@ mod tests {
     fn test_goal_pause() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path();
-        let g = goal_state::GoalState::new("test goal");
+        let g = rushi_goal_state::GoalState::new("test goal");
         g.save(session_dir).unwrap();
 
         // Simulate pause
-        let mut loaded = goal_state::GoalState::load(session_dir).unwrap();
+        let mut loaded = rushi_goal_state::GoalState::load(session_dir).unwrap();
         assert!(loaded.is_open());
         loaded.active = false;
         loaded.save(session_dir).unwrap();
 
-        let reloaded = goal_state::GoalState::load(session_dir).unwrap();
+        let reloaded = rushi_goal_state::GoalState::load(session_dir).unwrap();
         assert!(!reloaded.is_open());
         assert!(!reloaded.active);
         assert!(!reloaded.blocked);
@@ -872,13 +872,13 @@ mod tests {
     fn test_goal_clear() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path();
-        let g = goal_state::GoalState::new("test goal");
+        let g = rushi_goal_state::GoalState::new("test goal");
         g.save(session_dir).unwrap();
         assert!(session_dir.join("goal.json").exists());
 
-        assert!(goal_state::GoalState::clear(session_dir));
+        assert!(rushi_goal_state::GoalState::clear(session_dir));
         assert!(!session_dir.join("goal.json").exists());
-        assert!(goal_state::GoalState::load(session_dir).is_none());
+        assert!(rushi_goal_state::GoalState::load(session_dir).is_none());
         // The goal's own state file survives as a trace.
         let trace = session_dir.join(format!("goal-{}.json", g.id));
         assert!(trace.exists(), "per-goal trace file must survive clear");
@@ -888,18 +888,18 @@ mod tests {
     fn test_goal_resume() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path();
-        let mut g = goal_state::GoalState::new("test goal");
+        let mut g = rushi_goal_state::GoalState::new("test goal");
         g.mark_blocked("some blocker");
         g.iteration = 5;
         g.used_tokens = 999;
         g.save(session_dir).unwrap();
 
-        let mut loaded = goal_state::GoalState::load(session_dir).unwrap();
+        let mut loaded = rushi_goal_state::GoalState::load(session_dir).unwrap();
         assert!(loaded.blocked);
         loaded.resume();
         loaded.save(session_dir).unwrap();
 
-        let reloaded = goal_state::GoalState::load(session_dir).unwrap();
+        let reloaded = rushi_goal_state::GoalState::load(session_dir).unwrap();
         assert!(reloaded.is_open());
         assert!(!reloaded.blocked);
         assert_eq!(reloaded.iteration, 0);
@@ -913,7 +913,7 @@ mod tests {
     fn test_goal_resume_blocked_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().to_path_buf();
-        let mut g = goal_state::GoalState::new("blocked goal");
+        let mut g = rushi_goal_state::GoalState::new("blocked goal");
         g.mark_blocked("missing dep");
         g.save(&session_dir).unwrap();
 
@@ -924,7 +924,7 @@ mod tests {
         // Simulate: session_dir is root/s1, so save goal there.
         let s1_dir = dir.path().join("s1");
         std::fs::create_dir_all(&s1_dir).unwrap();
-        let mut g2 = goal_state::GoalState::new("blocked goal");
+        let mut g2 = rushi_goal_state::GoalState::new("blocked goal");
         g2.mark_blocked("missing dep");
         g2.save(&s1_dir).unwrap();
 
@@ -940,7 +940,7 @@ mod tests {
         assert!(msg.contains("resumed"), "{msg}");
 
         // Goal should now be open again.
-        let reloaded = goal_state::GoalState::load(&s1_dir).unwrap();
+        let reloaded = rushi_goal_state::GoalState::load(&s1_dir).unwrap();
         assert!(reloaded.is_open());
         assert!(!reloaded.blocked);
     }
@@ -950,7 +950,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s1_dir = dir.path().join("s1");
         std::fs::create_dir_all(&s1_dir).unwrap();
-        let mut g = goal_state::GoalState::new("done goal");
+        let mut g = rushi_goal_state::GoalState::new("done goal");
         g.mark_completed();
         g.save(&s1_dir).unwrap();
 
@@ -975,7 +975,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s1_dir = dir.path().join("s1");
         std::fs::create_dir_all(&s1_dir).unwrap();
-        let mut g = goal_state::GoalState::new("paused goal");
+        let mut g = rushi_goal_state::GoalState::new("paused goal");
         g.active = false; // paused, not blocked or completed
         g.save(&s1_dir).unwrap();
 
@@ -1000,7 +1000,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new("ship the decoupling");
+        let mut g = rushi_goal_state::GoalState::new("ship the decoupling");
         g.opened_at = Some("t+0s".to_string());
         g.used_tokens = 12_400;
         g.save(&session_dir).unwrap();
@@ -1032,7 +1032,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new(
+        let mut g = rushi_goal_state::GoalState::new(
             "Ship a very long goal that runs far longer than the terminal width allows so the timer and token counter would wrap off screen",
         );
         g.opened_at = Some("t+0s".to_string());
@@ -1066,7 +1066,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new("fix it");
+        let mut g = rushi_goal_state::GoalState::new("fix it");
         g.opened_at = Some("t+0s".to_string());
         g.used_tokens = 42;
         g.save(&session_dir).unwrap();
@@ -1142,7 +1142,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new("done goal");
+        let mut g = rushi_goal_state::GoalState::new("done goal");
         g.mark_completed();
         g.save(&session_dir).unwrap();
 
@@ -1166,7 +1166,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new("ship the decoupling");
+        let mut g = rushi_goal_state::GoalState::new("ship the decoupling");
         g.used_tokens = 12_400;
         g.save(&session_dir).unwrap();
 
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_goal_status_help_shows_full_content() {
-        let mut g = goal_state::GoalState::new(
+        let mut g = rushi_goal_state::GoalState::new(
             "Ship a very long goal that runs far longer than the terminal width allows so the timer and token counter would wrap off screen",
         );
         g.id = "g-abcdef01".to_string();
@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn test_goal_status_help_blocked() {
-        let mut g = goal_state::GoalState::new("blocked goal");
+        let mut g = rushi_goal_state::GoalState::new("blocked goal");
         g.mark_blocked("missing dependency");
         let help = goal_status_help(&g, 300);
         assert!(help.contains("blocked"), "status label: {help}");
@@ -1214,7 +1214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new("paused goal");
+        let mut g = rushi_goal_state::GoalState::new("paused goal");
         g.active = false;
         g.save(&session_dir).unwrap();
 
@@ -1242,7 +1242,7 @@ mod tests {
 
     #[test]
     fn test_goal_status_help_shape() {
-        let mut g = goal_state::GoalState::new("do the thing");
+        let mut g = rushi_goal_state::GoalState::new("do the thing");
         g.id = "g-abc12345".to_string();
         g.used_tokens = 12_400;
         let help = goal_status_help(&g, 154);
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn test_goal_elapsed_closed_uses_closed_at() {
-        let mut g = goal_state::GoalState::new("done");
+        let mut g = rushi_goal_state::GoalState::new("done");
         g.opened_at = Some("t+100s".to_string());
         g.mark_completed();
         g.closed_at = Some("t+200s".to_string());
@@ -1268,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_goal_elapsed_active_uses_now() {
-        let mut g = goal_state::GoalState::new("running");
+        let mut g = rushi_goal_state::GoalState::new("running");
         g.opened_at = Some("t+100s".to_string());
         // Active goal: elapsed = now - opened_at (capped at 0)
         assert_eq!(goal_elapsed(&g, 200), 100);
@@ -1282,7 +1282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("s1");
         std::fs::create_dir_all(&session_dir).unwrap();
-        let mut g = goal_state::GoalState::new(
+        let mut g = rushi_goal_state::GoalState::new(
             "ship a very long goal description that would easily overflow the terminal width if not truncated properly by the row builder",
         );
         g.used_tokens = 10_800_000;
@@ -1351,7 +1351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host_dir = dir.path().join("host-resolved");
         std::fs::create_dir_all(&host_dir).unwrap();
-        let mut g = goal_state::GoalState::new("host dir goal");
+        let mut g = rushi_goal_state::GoalState::new("host dir goal");
         g.mark_blocked("missing dep");
         g.save(&host_dir).unwrap();
 
@@ -1371,7 +1371,7 @@ mod tests {
         assert!(ok, "host session_dir should let resume succeed: {msg}");
         assert!(msg.contains("resumed"), "{msg}");
 
-        let reloaded = goal_state::GoalState::load(&host_dir).unwrap();
+        let reloaded = rushi_goal_state::GoalState::load(&host_dir).unwrap();
         assert!(reloaded.is_open());
     }
 }

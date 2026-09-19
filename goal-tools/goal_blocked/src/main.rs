@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use goal_state::GoalState;
+use rushi_goal_state::GoalState;
 
 fn main() {
     let args = read_stdin_json();

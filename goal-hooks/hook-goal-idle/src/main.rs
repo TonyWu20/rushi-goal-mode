@@ -29,7 +29,7 @@
 
 use std::io::Read;
 
-use goal_state::GoalState;
+use rushi_goal_state::GoalState;
 
 fn main() {
     // Self-documentation.

@@ -8,7 +8,7 @@
 //! (docs/system-prompt-generation.md D5):
 //!
 //! 1. **Prompt fragment.** The cache-stable goal fragment
-//!    (`goal_state::GoalState::build_goal_fragment`, a pure function
+//!    (`rushi_goal_state::GoalState::build_goal_fragment`, a pure function
 //!    of `(goal, goal_id)`) is set under `request.prompt_fragments`
 //!    as the ordered `[id, text]` pair `["goal", <block>]`. The
 //!    kernel joins all fragments into `request.instructions` after
@@ -44,7 +44,7 @@
 
 use std::io::Read;
 
-use goal_state::GoalState;
+use rushi_goal_state::GoalState;
 
 fn main() {
     // Self-documentation.

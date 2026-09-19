@@ -27,6 +27,6 @@ path = "src/main.rs"
 [dependencies]
 serde_json = "1.0"
 regex = "1"
-# `goal-state` is a sibling crate in this exts repo. All goal-mode
+# `rushi-goal-state` is a sibling crate in this exts repo. All goal-mode
 # packages share it via a local path dep.
-goal-state = { path = "../../goal-state" }
+rushi-goal-state = { path = "../../goal-state" }

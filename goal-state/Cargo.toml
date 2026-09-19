@@ -1,4 +1,4 @@
-# Shared goal-mode state library for the exts goal packages.
+# `rushi-goal-state` — shared goal-mode state library for the goal exts.
 #
 # Standalone cargo package: the empty `[workspace]` table stops cargo
 # from attaching it to an ancestor workspace, matching every other
@@ -7,11 +7,22 @@
 # Build: `cargo build` in this directory (a library, so no binary).
 # The goal-hooks/, goal-tools/, and ui_extensions/goal packages
 # depend on it via `path = "../../goal-state"`.
+#
+# Published to crates.io as `rushi-goal-state` (the crates.io name is
+# the package name; the directory keeps the short `goal-state` name,
+# like the kernel's `crates/rushi` dir holding `rushi-common`).
+# Rushi-WebUI's web goal-ext consumes the published version, so both
+# goal-exts share one schema source (docs/webui-dev-guide.md in the
+# Rushi-WebUI repo; the `rushi-common` publish pattern).
 
 [package]
-name = "goal-state"
+name = "rushi-goal-state"
 version = "0.1.0"
 edition = "2021"
+description = "Shared goal-mode state for the rushi agent harness (goal JSON schema, per-goal files, pointer layout, goal prompt fragments)"
+license = "MIT"
+repository = "https://github.com/TonyWu20/rushi-goal-mode"
+homepage = "https://github.com/TonyWu20/rushi-goal-mode"
 
 [workspace]
 

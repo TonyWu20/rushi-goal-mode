@@ -1,4 +1,4 @@
-//! `goal-state` — shared goal state for the pi-goal port.
+//! `rushi-goal-state` — shared goal state for the pi-goal port.
 //!
 //! A goal is a long-running task that the agent pursues across
 //! multiple turns. Goal state persists in the session directory as

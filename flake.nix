@@ -30,7 +30,7 @@
           ];
 
           # Build one standalone cargo crate from a subpath of this flake's
-          # source tree. Intra-repo path deps (goal-state) resolve because
+          # source tree. Intra-repo path deps (rushi-goal-state) resolve because
           # the flake source tree stays intact in the Nix store.
           # The output binary name comes from the crate's [[bin]] name in
           # Cargo.toml, not from crateName.
@@ -39,7 +39,7 @@
               pname = crateName;
               version = "0.1.0";
               # Use the whole repo as src so intra-repo path deps
-              # (e.g. goal-state) resolve. buildAndTestSubdir cd's into
+              # (e.g. rushi-goal-state) resolve. buildAndTestSubdir cd's into
               # the crate before cargo runs, and sets CARGO_TARGET_DIR
               # to the build root so cargoInstallHook finds it.
               src = "${self}";
