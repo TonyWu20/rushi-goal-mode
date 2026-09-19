@@ -1,7 +1,7 @@
 # rushi-goal-state publish decision
 
-Status: staged, not yet published. The crates.io token step is
-outstanding.
+Status: published to crates.io as `rushi-goal-state 0.1.0`
+(2026-09-19). Follow-up consumer work is below.
 
 ## Decisions (session 2026-09-19)
 
@@ -24,10 +24,13 @@ repository, homepage in the manifest). Rushi-WebUI records the
 upstream decision in its `docs/webui-dev-guide.md` and
 `docs/ui-extension-web.md` (D9).
 
+## Done
+
+- 2026-09-19: committed the rename/license/metadata change set.
+- 2026-09-19: published `rushi-goal-state 0.1.0` to crates.io.
+
 ## Remaining steps
 
-1. Commit this change set.
-2. `cargo publish` in `goal-state/` (a crates.io auth token is
-   needed, and none is on this machine yet).
-3. Point Rushi-WebUI's web goal-ext at
-   `rushi-goal-state = "0.1"` on crates.io.
+1. Rushi-WebUI: point its web goal-ext at
+   `rushi-goal-state = "0.1"` on crates.io and delete its
+   hand-mirrored `bin/rushi-web/src/goal.rs`.
