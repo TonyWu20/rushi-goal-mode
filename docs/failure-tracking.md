@@ -182,3 +182,89 @@ The kernel refire mechanism is unchanged and works as designed.
 See kernel issue #6.
 The cap bounded the damage.
 The goal extension now requests only the decisions it needs.
+
+## FT-004 — `used_tokens` stuck at 0 in Nix-driven sessions (missing `model.after` hook registration)
+
+**Symptom**
+These sessions run under the Nix-provided `rushi-configured` package.
+They come from the `~/programming/flake.nix` dev shell.
+Its `rushi-config` input supplies that package.
+Their goal files showed `used_tokens: 0` and `iteration: 0`.
+Example: `sessions/research-laya/goal-g-897478a9.json`
+and `sessions/no-token-count-again/goal-g-2a1847bb.json`.
+
+**Root cause**
+Two layers, both in the Nix deployment.
+None in the goal-app code.
+
+1. The running `rushi` binary was
+   `/nix/store/...-rushi-configured-0.1/bin/rushi`.
+   I checked it via `/proc/<loop.pid>/exe`.
+   Its bundled `config.toml` registered goal hooks on
+   `run.idle`, `compact.before`, `tool.before`, and `model.before`.
+   It registered nothing on `model.after`.
+   Its `hooks/` dir shipped the four goal hooks,
+   but not `harness-hook-goal-tokens`.
+
+2. The aggregator that generates that config is
+   `rushi-config/flake.nix`.
+   It drives everything from its declare-once
+   `exts.extHooks` table.
+   Each row names the package to bundle and the
+   `[[hooks.on]]` windows.
+   `hook-goal-tokens` landed in goal-app at commit `a86692e`.
+   The flake exposes it as the `hook-goal-tokens` package.
+   The `rushi-config` goal-mode input already locked a rev
+   containing it (`20f4eedc`).
+
+   But the `extHooks` table never gained its row.
+   So no Nix-built package bundled the binary or
+   registered the window.
+
+Second factor: the fallback never ran.
+`harness-hook-goal-idle` also recomputes `used_tokens`
+on `run.idle`.
+That window fires only when the loop is about to stop on
+an idle claim, with no pending follow-ups.
+
+Both affected sessions were user-driven.
+Their logs contain zero "Goal continuation" `user_message`
+events.
+So the run.idle write path never executed.
+
+**Fix (consumer-side, `rushi-config` repo)**
+One row in the `exts.extHooks` table of
+`rushi-config/flake.nix`:
+
+    { pkg = goalFlake.packages.${system}."hook-goal-tokens"; windows = [ "model.after" ]; }
+
+That row feeds `rushi.external_hooks`, bundling the binary
+into `$out/hooks/`.
+It also feeds the generated `[[hooks.on]]` registration.
+The bare command comes from `meta.rushi.bin`, the kernel
+issue #13 mechanism.
+
+It landed as rushi-config commit `c716b62`.
+Its message: "flake: register hook-goal-tokens on model.after
+in the exts table".
+
+**Verification**
+- `nix build rushi-config#rushi` at the new rev.
+  The rebuilt package's `config.toml` registers
+  `harness-hook-goal-tokens` on `model.after`.
+  Its `hooks/` dir ships the binary.
+- A dev-shell restart is needed for the live effect.
+  The running loop holds the old store path.
+- After restart, the first model call makes the hook assign
+  `used_tokens` the cumulative input+output sum.
+  It covers the whole `events.jsonl`, which is append-only
+  and compaction-stable.
+  The figure self-heals without a per-goal reset.
+
+**Related (out of scope here)**
+The dev-loop build list in `rushi-exts` (`ext-env.sh`)
+already includes `hook-goal-tokens`.
+Only the Nix aggregator lagged.
+A deploy checklist could catch this class of drift:
+verify that every goal-app hook row exists in the
+rushi-config table.
