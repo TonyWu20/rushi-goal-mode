@@ -2,32 +2,37 @@
 //!
 //! Registered on the `run.idle` window. When the loop is about to stop
 //! on an idle claim, this hook checks whether a goal is still open.
-//! If the goal is `active` and not `blocked`/`completed`, it
-//! increments the iteration counter, updates token accounting
-//! (informational only — no budget cap, docs/goal-ux.md §1.6),
-//! and returns a `continue` decision with a continuation prompt so
-//! the loop keeps working toward the goal.
+//!
+//! §12 pipeline ABI (rushi-goal-mode issue #5; kernel spec §12.5,
+//! `docs/loop-lifecycle-hooks.md:649`): the retired §4.3 `continue`
+//! decision envelope is gone. Instead the hook appends its own follow-up
+//! `user_message` to the session log via `LOG_BIN`; the loop then
+//! re-claims and stays alive iff the re-claim has `pending_follow_ups`
+//! or state ≠ idle. So the *append* is the mechanism that keeps the loop
+//! going — not a returned `decision: continue`.
 //!
 //! Termination comes from user controls (§1.6):
 //!   - `goal_complete` closes the goal
 //!   - `goal_blocked` closes the goal
 //!   - `goal pause` / `goal clear` (TUI) stop the loop
 //!
-//! Refire guarantee (rushi-goal-mode issue #1): this hook never
-//! requests a silent `refire` (kernel issue #6). A refire re-runs the
-//! model with no new user message, which after `goal_complete` produced
-//! wasted turns and a false user-confirmation that leaked into the
-//! transcript. A goal in a terminal state (completed, blocked, or
-//! paused) therefore yields *no decision* so the loop stops cleanly.
-//! An open goal gets a logged continuation (`user_message`), which is
-//! the goal-mode mechanism for keeping the loop alive.
+//! Refire guarantee (rushi-goal-mode issue #1): a terminal goal
+//! (completed, blocked, or paused) appends *nothing*, so the loop stops
+//! cleanly and the kernel runs no further model turns. An open goal
+//! appends a logged continuation `user_message` — the goal-mode
+//! mechanism for keeping the loop alive — never a silent `refire`.
 //!
-//! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
-//! - exit 0 + `{}` → no decision, the loop stops (window default)
-//! - exit 0 + `{"decision":"continue","payload":{"message":"..."}}`
-//!   → the loop appends a follow `user_message` and continues.
+//! Contract (spec §12.5):
+//! - terminal or absent goal → append nothing, print `{}` (noop), exit 0.
+//! - open goal → increment the iteration counter *before* building the
+//!   continuation prompt, then append one follow-queue `user_message`
+//!   via `"$LOG_BIN" --session "$SESSION"` (event JSON on stdin). On any
+//!   spawn/write/exit failure → print `{"reason": ...}` and exit 3: the
+//!   chain stops, the window default (`stop`) applies, and a
+//!   `hook.run.idle.error` marker is logged carrying that reason.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 
 use rushi_goal_state::GoalState;
 
@@ -41,8 +46,10 @@ fn main() {
 
     let payload = read_stdin_json();
 
-    // Not our window: no-op.
-    if payload.get("window").and_then(|w| w.as_str()) != Some("run.idle") {
+    // §12 window dispatch: the `HARNESS_WINDOW` env var (kernel-injected)
+    // is authoritative; fall back to the payload's `window` field for
+    // manual invocation (a shell with no kernel env).
+    if !window_is(&payload, "run.idle") {
         println!("{{}}");
         return;
     }
@@ -65,62 +72,115 @@ fn main() {
     };
 
     // Token accounting (informational only, docs/goal-ux.md §1.6):
-    // set used_tokens to the cumulative input+output total across all
-    // assistant_message and compaction_summary events in the log — the
-    // same figure the TUI statusline shows as `sum` (docs/auto-compact-
-    // plan.md section 4.6). This is idempotent and compaction-robust:
-    // the log is append-only, so re-reading after a compact still covers
-    // the full session history. Placed before the is_open check so the
-    // final turn's tokens are captured even when the goal just closed.
+    // assign `used_tokens` to the cumulative input+output total across
+    // all `assistant_message` and `compaction_summary` events in the log.
+    // Runs *before* the `is_open()` check so the final turn's tokens are
+    // captured even when the goal just closed.
     let events_path = session_dir.join("events.jsonl");
     if let Some(total) = GoalState::sum_usage_tokens(&events_path) {
         goal.used_tokens = total;
     }
 
-    // A completed, blocked, or paused goal stops the loop (issue #1):
-    // terminal goals get no decision and never request a refire.
-    if !goal.is_open() {
+    // A completed, blocked, or paused goal appends nothing: the loop
+    // stops (issue #1 — no continuation, no refire).
+    if !should_continue(&goal) {
         let _ = goal.save(&session_dir);
-        println!("{}", idle_decision(&goal));
+        println!("{{}}");
         return;
     }
 
-    // Increment the continuation counter (docs/goal-ux.md §2: used
-    // only by the logged continuation message and the TUI display,
-    // never by the injected goal block).
+    // Open goal: increment the counter *before* building the prompt,
+    // persist it, then append the follow-queue `user_message` that keeps
+    // the loop going. The log append is what the kernel's re-claim sees
+    // as a pending follow-up.
     goal.iteration += 1;
-
     let _ = goal.save(&session_dir);
 
-    println!("{}", idle_decision(&goal));
+    let log_bin = match std::env::var("LOG_BIN") {
+        Ok(b) if !b.is_empty() => b,
+        _ => {
+            fail("LOG_BIN is not set; cannot append the continuation user_message");
+        }
+    };
+    let session = session_dir.to_string_lossy().into_owned();
+    if let Err(reason) = append_continuation(&goal, &log_bin, &session) {
+        fail(&format!("LOG_BIN append failed: {reason}"));
+    }
+
+    // Success: noop stdout. The kernel re-claims and finds the follow-up.
+    println!("{{}}");
 }
 
-/// The `run.idle` decision, computed from the goal state alone.
-///
-/// Issue #1: this is a pure function of the goal's state so the
-/// terminal-state gate is explicit and testable.
-///
-/// - **Terminal goal** (completed, blocked, or paused): returns `{}`
-///   (no decision). The kernel stops the loop and runs no further model
-///   turns. In particular the goal extension never requests a silent
-///   `refire`: a refire after `goal_complete`/`goal_blocked` would
-///   re-run the model with no new user message, wasting a call and
-///   risking a false user-confirmation in the transcript.
-/// - **Open goal**: returns a `continue` decision carrying a logged
-///   continuation `message`. The kernel appends it as a `user_message`,
-///   which keeps the goal progressing and is traceable in the log.
-///   No `refire` payload is emitted.
-fn idle_decision(goal: &GoalState) -> serde_json::Value {
-    if goal.is_open() {
-        serde_json::json!({
-            "decision": "continue",
-            "payload": {
-                "message": goal.build_continue_prompt(),
-            },
-        })
-    } else {
-        serde_json::json!({})
+/// Append the goal's continuation prompt to the session log as a
+/// follow-queue `user_message` (§12.5). The event line is written to
+/// `LOG_BIN`'s stdin; its exit status is the append result.
+fn append_continuation(
+    goal: &GoalState,
+    log_bin: &str,
+    session: &str,
+) -> Result<(), String> {
+    let event = continuation_event(
+        goal,
+        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    let mut child = Command::new(log_bin)
+        .arg("--session")
+        .arg(session)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn {log_bin:?} failed: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = writeln!(stdin, "{event}") {
+            return Err(format!("write to {log_bin} stdin failed: {e}"));
+        }
     }
+    match child.wait().map_err(|e| format!("wait on {log_bin} failed: {e}"))? {
+        s if s.success() => Ok(()),
+        s => Err(format!("{log_bin} exited {s}")),
+    }
+}
+
+/// The §12.5 continuation event: a follow-queue `user_message` carrying
+/// the goal's continuation prompt. Pure function of `(goal, ts)` so the
+/// shape is testable without spawning `LOG_BIN`.
+fn continuation_event(goal: &GoalState, ts: &str) -> serde_json::Value {
+    serde_json::json!({
+        "v": 1,
+        "type": "user_message",
+        "ts": ts,
+        "content": goal.build_continue_prompt(),
+        "queue": "follow",
+    })
+}
+
+/// Whether the goal warrants a continuation append (an open goal).
+/// Terminal goals append nothing (issue #1).
+fn should_continue(goal: &GoalState) -> bool {
+    goal.is_open()
+}
+
+/// §12 window dispatch. The `HARNESS_WINDOW` env var is authoritative
+/// (the kernel sets it per firing); when it is unset (manual
+/// invocation from a shell), fall back to the payload's `window` field.
+/// The model.before request object carries no `window` key, so the env
+/// is the only source there; for run.idle the payload also has one,
+/// which keeps manual stdin invocation working.
+fn window_is(payload: &serde_json::Value, want: &str) -> bool {
+    let env_window = std::env::var("HARNESS_WINDOW");
+    let effective = match &env_window {
+        Ok(w) if !w.is_empty() => w.as_str(),
+        _ => payload.get("window").and_then(|w| w.as_str()).unwrap_or(""),
+    };
+    effective == want
+}
+
+/// Exit-3 failure path: the kernel's `step` status is `fail` (P4), which
+/// stops the chain, applies the window default (`stop`), and logs a
+/// `hook.run.idle.error` marker carrying the printed `reason`.
+fn fail(reason: &str) -> ! {
+    println!("{}", serde_json::json!({ "reason": reason }));
+    eprintln!("harness-hook-goal-idle: {reason}");
+    std::process::exit(3);
 }
 
 fn read_stdin_json() -> serde_json::Value {
@@ -146,12 +206,12 @@ fn resolve_session_dir() -> Option<std::path::PathBuf> {
 fn print_help() {
     println!("harness-hook-goal-idle — goal-continuation hook (run.idle)");
     println!();
-    println!("Window: run.idle");
-    println!("Input (stdin): window JSON with keys window, session, last_assistant_message_id");
-    println!("Output (stdout):");
-    println!("  {{}}  — stop the loop (no goal, goal not active, or goal closed)");
-    println!("  {{\"decision\":\"continue\",\"payload\":{{\"message\":\"...\"}}}} — keep going");
-    println!("Exit codes: 0 = ok");
+    println!("Window: run.idle (dispatch: $HARNESS_WINDOW, else payload window)");
+    println!("Input (stdin): window JSON; $LOG_BIN and $SESSION are the append targets");
+    println!("Output (stdout): {{}} — no goal, terminal goal, or continuation appended");
+    println!("Side effect: an open goal appends one follow-queue user_message");
+    println!("  to the session log via LOG_BIN (keeps the loop alive, §12.5).");
+    println!("Exit codes: 0 = ok; 3 = could not append (chain stops, loop stops)");
 }
 
 #[cfg(test)]
@@ -159,7 +219,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// P10: active goal → continue with continuation prompt.
+    /// P10: active goal → the continuation prompt names the counter and
+    /// goal. (Prompt shape is unchanged by the §12 migration.)
     #[test]
     fn test_active_goal_continues() {
         let dir = TempDir::new().unwrap();
@@ -167,54 +228,49 @@ mod tests {
         g.iteration = 3;
         g.save(dir.path()).unwrap();
 
-        let loaded = GoalState::load(dir.path()).unwrap();
+        let mut loaded = GoalState::load(dir.path()).unwrap();
         assert!(loaded.is_open());
+        assert!(should_continue(&loaded));
 
-        // Simulate what main() does: increment, save, build prompt.
-        let mut g2 = loaded;
-        g2.iteration += 1;
-        let prompt = g2.build_continue_prompt();
+        loaded.iteration += 1;
+        let prompt = loaded.build_continue_prompt();
         assert!(prompt.contains("continuation #4"), "{prompt}");
         assert!(prompt.contains("fix the bug"), "{prompt}");
     }
 
-    /// P11: no active goal → stop.
+    /// P11: no active goal / paused goal → no continuation.
     #[test]
     fn test_no_active_goal_stops() {
         let dir = TempDir::new().unwrap();
         assert!(GoalState::load(dir.path()).is_none());
 
-        // Also test a paused goal (active = false).
         let mut g = GoalState::new("test");
         g.active = false;
         g.save(dir.path()).unwrap();
         let loaded = GoalState::load(dir.path()).unwrap();
         assert!(!loaded.is_open());
+        assert!(!should_continue(&loaded));
     }
 
+    /// No budget cap: even with a very high `used_tokens`, the open goal
+    /// continues.
     #[test]
     fn test_no_budget_stop() {
-        // P10: even with a very high used_tokens, the goal continues.
         let dir = TempDir::new().unwrap();
         let mut g = GoalState::new("big goal");
         g.used_tokens = 999_999_999;
         g.iteration = 100;
         g.save(dir.path()).unwrap();
 
-        let loaded = GoalState::load(dir.path()).unwrap();
+        let mut loaded = GoalState::load(dir.path()).unwrap();
         assert!(loaded.is_open());
-        // No budget_exhausted() method anymore — the loop never stops
-        // on token count.
-        let mut g2 = loaded;
-        g2.iteration += 1;
-        let prompt = g2.build_continue_prompt();
+        loaded.iteration += 1;
+        let prompt = loaded.build_continue_prompt();
         assert!(prompt.contains("continuation #101"), "{prompt}");
     }
 
-    /// A closed goal (completed/blocked) still records cumulative
-    /// token usage from the log before the loop stops.
-    /// This ensures used_tokens is recorded even when the goal closes
-    /// on the very turn the idle hook fires.
+    /// A closed goal still records cumulative token usage from the log
+    /// before the loop stops.
     #[test]
     fn test_closed_goal_still_gets_token_accounting() {
         let dir = TempDir::new().unwrap();
@@ -222,8 +278,6 @@ mod tests {
         g.mark_completed();
         g.save(dir.path()).unwrap();
 
-        // Simulate assistant messages and a compaction summary with
-        // usage data in the log.
         let events_path = dir.path().join("events.jsonl");
         std::fs::write(
             &events_path,
@@ -235,86 +289,74 @@ mod tests {
         )
         .unwrap();
 
-        // Simulate what main() does:
-        // token accounting runs BEFORE the is_open() check.
         let mut loaded = GoalState::load(dir.path()).unwrap();
         assert!(!loaded.is_open(), "goal should be closed");
-        assert_eq!(loaded.used_tokens, 0, "no tokens yet");
-
-        // The sum of all input+output tokens: (100+42) + (5000+800)
-        // + (100+58) = 6100.
         let total = GoalState::sum_usage_tokens(&events_path);
-        assert_eq!(total, Some(6100));
         loaded.used_tokens = total.unwrap();
-
-        // Save and verify the token count was recorded despite the
-        // goal being closed.
         loaded.save(dir.path()).unwrap();
+
         let reloaded = GoalState::load(dir.path()).unwrap();
-        assert_eq!(
-            reloaded.used_tokens, 6100,
-            "closed goal should still record cumulative tokens"
-        );
+        // (100+42) + (5000+800) + (100+58) = 6100.
+        assert_eq!(reloaded.used_tokens, 6100);
         assert!(reloaded.completed);
     }
 
-    // ── issue #1: terminal goals must not refire or continue ──
+    // ── issue #1: terminal goals must not append or refire ──
 
-    /// A completed goal yields no decision: the loop stops and the
-    /// kernel runs no further model turns. No `refire` is requested.
+    /// A completed goal appends nothing.
     #[test]
-    fn issue1_completed_goal_yields_no_decision() {
+    fn issue1_completed_goal_appends_nothing() {
         let mut g = GoalState::new("done");
         g.mark_completed();
-        let d = idle_decision(&g);
-        assert_eq!(d, serde_json::json!({}), "completed goal must stop: {d}");
-        assert!(
-            d.get("refire").is_none(),
-            "completed goal must not request a refire: {d}"
-        );
+        assert!(!should_continue(&g));
     }
 
-    /// A blocked goal yields no decision: same stop-and-no-refire
-    /// guarantee as a completed goal.
+    /// A blocked goal appends nothing.
     #[test]
-    fn issue1_blocked_goal_yields_no_decision() {
+    fn issue1_blocked_goal_appends_nothing() {
         let mut g = GoalState::new("stuck");
         g.mark_blocked("missing dependency");
-        let d = idle_decision(&g);
-        assert_eq!(d, serde_json::json!({}), "blocked goal must stop: {d}");
-        assert!(
-            d.get("refire").is_none(),
-            "blocked goal must not request a refire: {d}"
-        );
+        assert!(!should_continue(&g));
     }
 
-    /// A paused goal (active == false) also stops, with no refire.
+    /// A paused goal (active == false) appends nothing.
     #[test]
-    fn issue1_paused_goal_yields_no_decision() {
+    fn issue1_paused_goal_appends_nothing() {
         let mut g = GoalState::new("paused");
         g.active = false;
-        let d = idle_decision(&g);
-        assert_eq!(d, serde_json::json!({}), "paused goal must stop: {d}");
+        assert!(!should_continue(&g));
     }
 
-    /// An open goal continues with a *logged* continuation message and
-    /// never requests a silent refire (issue #1: the goal extension
-    /// must not request refires it does not need).
+    /// An open goal's continuation event is a follow-queue
+    /// `user_message` carrying the prompt, with no §4.3 `decision`/
+    /// `refire` envelope fields (the §12 append *is* the mechanism).
     #[test]
-    fn issue1_open_goal_continues_without_refire() {
+    fn issue1_open_goal_event_shape() {
         let mut g = GoalState::new("keep working");
+        g.id = "g-00c0ffee".to_string();
         g.iteration = 3;
-        // main() increments the counter before computing the decision.
-        g.iteration += 1;
-        let d = idle_decision(&g);
-        assert_eq!(d["decision"], "continue");
-        let msg = d["payload"]["message"].as_str().unwrap();
+        g.iteration += 1; // main() increments before building.
+        let ev = continuation_event(&g, "2025-01-01T00:00:00Z");
+        assert_eq!(ev["v"], 1);
+        assert_eq!(ev["type"], "user_message");
+        assert_eq!(ev["ts"], "2025-01-01T00:00:00Z");
+        assert_eq!(ev["queue"], "follow");
+        let msg = ev["content"].as_str().unwrap();
         assert!(msg.contains("continuation #4"), "{msg}");
         assert!(msg.contains("keep working"), "{msg}");
-        // The critical guarantee: no silent refire.
-        assert!(
-            d["payload"].get("refire").is_none(),
-            "open goal must continue via a logged message, not a refire: {d}"
-        );
+        assert!(msg.contains("g-00c0ffee"), "{msg}");
+        // No §4.3 envelope fields anywhere in the event.
+        assert!(ev.get("decision").is_none());
+        assert!(ev.get("refire").is_none());
+        assert!(ev.get("payload").is_none());
+    }
+
+    /// A failing `LOG_BIN` (non-existent path) is a hard append error,
+    /// exercising the exit-3 path without the real log binary.
+    #[test]
+    fn append_continuation_fails_on_bad_log_bin() {
+        let g = GoalState::new("x");
+        let err = append_continuation(&g, "/nonexistent/log-bin-xyz", "s").unwrap_err();
+        assert!(err.contains("/nonexistent/log-bin-xyz"), "{err}");
     }
 }

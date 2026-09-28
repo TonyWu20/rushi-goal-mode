@@ -12,8 +12,14 @@
 //! The hook is kept in the config so the `compact.before` window
 //! still has a goal-aware slot; it is a no-op pass-through.
 //!
-//! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
-//! - exit 0 + `{}` → no decision, compaction proceeds (window default)
+//! §12 pipeline ABI (rushi-goal-mode issue #5): `{}` is the no-op
+//! state (accumulated state unchanged). Window dispatch is
+//! `$HARNESS_WINDOW` (kernel-injected, authoritative) with the
+//! payload `window` field as a manual-invocation fallback.
+//!
+//! §12.5 effect table: `compact.before` effect fields are `cancel`
+//! and `replace`; this hook emits neither, so the window default
+//! (proceed) applies.
 
 use std::io::Read;
 
@@ -27,14 +33,26 @@ fn main() {
 
     let payload = read_stdin_json();
 
-    // Not our window: no-op.
-    if payload.get("window").and_then(|w| w.as_str()) != Some("compact.before") {
+    // Not our window: no-op. Dispatch: $HARNESS_WINDOW is authoritative
+    // (kernel-injected, §12); the payload field covers manual invocation.
+    if !window_is(&payload, "compact.before") {
         println!("{{}}");
         return;
     }
 
     // No budget cap in goal mode (§1.6): always allow compaction.
     println!("{{}}");
+}
+
+/// §12 window dispatch: `$HARNESS_WINDOW` is authoritative; fall back
+/// to the payload's `window` field for manual invocations.
+fn window_is(payload: &serde_json::Value, want: &str) -> bool {
+    if let Ok(env_w) = std::env::var("HARNESS_WINDOW") {
+        if !env_w.is_empty() {
+            return env_w == want;
+        }
+    }
+    payload.get("window").and_then(|w| w.as_str()) == Some(want)
 }
 
 fn read_stdin_json() -> serde_json::Value {
@@ -48,7 +66,7 @@ fn read_stdin_json() -> serde_json::Value {
 fn print_help() {
     println!("harness-hook-goal-compact — goal compaction hook (compact.before)");
     println!();
-    println!("Window: compact.before");
+    println!("Window: compact.before (dispatch: $HARNESS_WINDOW, else payload window)");
     println!("Input (stdin): window JSON with keys window, session, reason, force");
     println!("Output (stdout):");
     println!("  {{}}  — no budget cap (§1.6); compaction always proceeds");
