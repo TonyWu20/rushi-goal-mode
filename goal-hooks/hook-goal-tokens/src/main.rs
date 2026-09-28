@@ -12,6 +12,11 @@
 //!
 //! Observation window: no decision. The hook prints `{}` and exits 0.
 //! The goal file is updated as a side effect.
+//!
+//! §12 pipeline ABI (rushi-goal-mode issue #5): `{}` is the no-op
+//! state (accumulated state unchanged). Window dispatch is
+//! `$HARNESS_WINDOW` (kernel-injected, authoritative) with the
+//! payload `window` field as a manual-invocation fallback.
 
 use std::io::Read;
 
@@ -26,8 +31,9 @@ fn main() {
 
     let payload = read_stdin_json();
 
-    // Not our window: no-op.
-    if payload.get("window").and_then(|w| w.as_str()) != Some("model.after") {
+    // Not our window: no-op. Dispatch: $HARNESS_WINDOW is authoritative
+    // (kernel-injected, §12); the payload field covers manual invocation.
+    if !window_is(&payload, "model.after") {
         println!("{{}}");
         return;
     }
@@ -62,6 +68,17 @@ fn main() {
     println!("{{}}");
 }
 
+/// §12 window dispatch: `$HARNESS_WINDOW` is authoritative; fall back
+/// to the payload's `window` field for manual invocations.
+fn window_is(payload: &serde_json::Value, want: &str) -> bool {
+    if let Ok(env_w) = std::env::var("HARNESS_WINDOW") {
+        if !env_w.is_empty() {
+            return env_w == want;
+        }
+    }
+    payload.get("window").and_then(|w| w.as_str()) == Some(want)
+}
+
 fn read_stdin_json() -> serde_json::Value {
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
@@ -85,7 +102,7 @@ fn resolve_session_dir() -> Option<std::path::PathBuf> {
 fn print_help() {
     println!("harness-hook-goal-tokens — live goal token accounting (model.after)");
     println!();
-    println!("Window: model.after");
+    println!("Window: model.after (dispatch: $HARNESS_WINDOW, else payload window)");
     println!("Input (stdin): window JSON with keys window, session, stop_reason, usage");
     println!("Output (stdout): {{}} (observation only, no decision)");
     println!("Side effect: rewrites the goal state file's used_tokens");

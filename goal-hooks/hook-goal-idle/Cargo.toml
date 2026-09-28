@@ -29,6 +29,12 @@ path = "src/main.rs"
 [dependencies]
 rushi-goal-state = { path = "../../goal-state" }
 serde_json = "1.0"
+# The appended `user_message` carries an RFC3339 `ts` (the kernel e2e
+# convention and the TUI both expect second-precision Zulu). We use
+# chrono here rather than adding it to `rushi-goal-state` (which stays
+# dependency-free, as it is published to crates.io and consumed by the
+# web goal-ext) — the kernel already uses the identical one-liner.
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

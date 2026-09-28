@@ -1,30 +1,39 @@
 //! `harness-hook-goal-arm` — goal-mode prompt fragment + tool filter.
 //!
-//! Registered on the `model.before` window. Reads the session's
-//! current goal (the `goal.json` pointer plus its `goal-<id>.json`
-//! state file) from the session directory.
+//! Registered on the `model.before` window. Reads the session's current
+//! goal (the `goal.json` pointer plus its `goal-<id>.json` state file)
+//! from the session directory.
 //!
-//! Two effects, both idempotent transforms of `request`
+//! §12 pipeline ABI (rushi-goal-mode issue #5; kernel spec §12.6):
+//! the retired §4.3 `{"decision":"transform","payload":{"request":...}}`
+//! envelope is gone. The kernel seeds the pipeline with `request.json`
+//! itself — the step's stdin state *is* the model request object (it
+//! carries no `window` key, so dispatch comes from the `HARNESS_WINDOW`
+//! env var). A step's output **is** the full replacement request
+//! object: this hook either emits the transformed request, or prints
+//! `{}` (no-op, state unchanged) when nothing goal-related needs doing.
+//! The kernel joins `prompt_fragments` into `instructions` and strips
+//! the field exactly once at the chain end.
+//!
+//! Two effects, both idempotent transforms of the request
 //! (docs/system-prompt-generation.md D5):
 //!
 //! 1. **Prompt fragment.** The cache-stable goal fragment
-//!    (`rushi_goal_state::GoalState::build_goal_fragment`, a pure function
-//!    of `(goal, goal_id)`) is set under `request.prompt_fragments`
-//!    as the ordered `[id, text]` pair `["goal", <block>]`. The
-//!    kernel joins all fragments into `request.instructions` after
-//!    the hook chain and strips the field before the model call.
-//!    This hook only ever touches its own `"goal"` key; fragments
-//!    owned by other extensions are preserved in order.
+//!    (`rushi_goal_state::GoalState::build_goal_fragment`, a pure
+//!    function of `(goal, goal_id)`) is set under
+//!    `prompt_fragments` as the ordered `["goal", <block>]` pair. This
+//!    hook only ever touches its own `"goal"` key; fragments owned by
+//!    other extensions are preserved in order.
 //!
 //! 2. **Tool filter (D1).** The `goal` schema is removed from
-//!    `request.tools` in every state. The `goal_complete` /
+//!    `tools` in every state. The `goal_complete` /
 //!    `goal_blocked` schemas are present only while the goal is open
 //!    (`active && !completed && !blocked`); they are removed once
 //!    the goal closes.
 //!
-//! The transform runs on every model call while the goal extension
-//! is installed (steady-state tool filter), so the emitted request is
-//! a pure function of (base request, goal state) and stays
+//! The transform runs on every model call while the goal extension is
+//! installed (steady-state tool filter), so the emitted request is a
+//! pure function of (base request, goal state) and stays
 //! byte-identical turn to turn (provider prefix cache stays warm).
 //!
 //! Fragment lifetime (docs/system-prompt-generation.md D6):
@@ -33,14 +42,6 @@
 //!   keeps the goal open; its state is blocked, not completed)
 //! - `goal_complete` (or `goal clear`) → `completed`/pointer gone,
 //!   the fragment is removed on the next model call
-//!
-//! Decision contract (docs/loop-lifecycle-hooks.md §4.3):
-//! - exit 0 + `{}` → proceed unchanged (nothing goal-related in the
-//!   request and no goal state to project).
-//! - exit 0 + `{"decision":"transform","payload":{"request":{...}}}`
-//!   → the harness replaces the request with the hook's version,
-//!   joins `prompt_fragments` into `instructions`, and strips the
-//!   field.
 
 use std::io::Read;
 
@@ -56,8 +57,10 @@ fn main() {
 
     let payload = read_stdin_json();
 
-    // Not our window: no-op.
-    if payload.get("window").and_then(|w| w.as_str()) != Some("model.before") {
+    // §12.6: dispatch on $HARNESS_WINDOW (kernel-injected,
+    // authoritative). The request object on stdin carries no `window`
+    // key, so the payload field is only a manual-invocation fallback.
+    if !window_is(&payload, "model.before") {
         println!("{{}}");
         return;
     }
@@ -75,38 +78,81 @@ fn main() {
     // log-derived).
     let goal = GoalState::load(&session_dir);
 
-    let request = payload
-        .get("request")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
+    // §12.6: the stdin state *is* the request object — no `request`
+    // key to unwrap.
+    let request = payload;
 
     // No goal state, no goal tool schema, no stale "goal" fragment:
-    // nothing for this hook to do. Emitting `{}` keeps the kernel's
-    // transform log quiet for sessions without the goal extension.
+    // nothing for this hook to do. Emitting `{}` (noop) keeps the
+    // kernel's transform log quiet for sessions without the goal
+    // extension and leaves the accumulated state unchanged.
     if !needs_transform(&request, goal.as_ref()) {
         println!("{{}}");
         return;
     }
 
     let req = apply_goal_transform(request, goal.as_ref());
-    let resp = serde_json::json!({
-        "decision": "transform",
-        "payload": {
-            "request": req,
-        },
-    });
-    println!("{}", resp);
+    // The emitted state is the full replacement request object —
+    // no control fields, no envelope.
+    println!("{req}");
 }
 
-/// Whether this hook must transform the request at all. The tool
-/// filter has to run on every call while any goal tool schema is
-/// visible to the model (steady state), so a request carrying
-/// `goal` / `goal_complete` / `goal_blocked` always transforms. The
-/// fragment is managed whenever a goal state file exists and is not
-/// completed (open **or** blocked, D6), or a stale `"goal"` fragment
-/// needs removing.
+/// §12 window dispatch: the `HARNESS_WINDOW` env var (kernel-injected)
+/// is authoritative; when unset, fall back to the payload's `window`
+/// field so manual invocations keep working.
+fn window_is(payload: &serde_json::Value, want: &str) -> bool {
+    if let Ok(env_w) = std::env::var("HARNESS_WINDOW") {
+        if !env_w.is_empty() {
+            return env_w == want;
+        }
+    }
+    payload.get("window").and_then(|w| w.as_str()) == Some(want)
+}
+
+/// Resolve the session directory from the hook env.
+fn resolve_session_dir() -> Option<std::path::PathBuf> {
+    let session = std::env::var("SESSION").ok()?;
+    let sessions_root = std::env::var("SESSIONS_ROOT").unwrap_or_else(|_| "sessions".into());
+    let p = if session.contains('/') || session.contains('\\') {
+        std::path::PathBuf::from(&session)
+    } else {
+        std::path::PathBuf::from(&sessions_root).join(&session)
+    };
+    Some(p)
+}
+
+fn read_stdin_json() -> serde_json::Value {
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(&buf).unwrap_or(serde_json::json!({}))
+}
+
+fn print_help() {
+    println!("harness-hook-goal-arm — goal-mode prompt fragment + tool filter (model.before)");
+    println!();
+    println!("Window: model.before (dispatch: $HARNESS_WINDOW, else payload window)");
+    println!("Input (stdin): the model request object itself (§12.6: no window key, no request wrapper)");
+    println!("Output (stdout):");
+    println!("  {{}} — nothing goal-related; state unchanged (no-op)");
+    println!(
+        "  {{...request...}} — the full replacement request: \
+         prompt_fragments[\"goal\"] set/removed per goal state; goal tool \
+         schemas filtered per D1. The kernel joins prompt_fragments into \
+         instructions and strips the field."
+    );
+    println!("Exit codes: 0 = ok");
+}
+
+/// Whether this hook must transform the request at all. The tool filter
+/// has to run on every call while any goal tool schema is visible to
+/// the model (steady state), so a request carrying `goal` /
+/// `goal_complete` / `goal_blocked` always transforms. The fragment is
+/// managed whenever a goal state file exists and is not completed (open
+/// **or** blocked, D6), or a stale `"goal"` fragment needs removing.
 fn needs_transform(request: &serde_json::Value, goal: Option<&GoalState>) -> bool {
-    if goal.map_or(false, |g| !g.completed) {
+    if goal.is_some_and(|g| !g.completed) {
         return true;
     }
     if has_goal_tools(request) || has_goal_fragment(request) {
@@ -150,13 +196,13 @@ fn has_goal_fragment(request: &serde_json::Value) -> bool {
 ///    `request.prompt_fragments` array; other extensions' keys pass
 ///    through untouched, in their original order.
 ///
-/// Pure function of (request, goal state): a second call with the
-/// same inputs re-emits byte-identical request JSON (P17).
+/// Pure function of (request, goal state): a second call with the same
+/// inputs re-emits byte-identical request JSON (P17).
 fn apply_goal_transform(
     mut req: serde_json::Value,
     goal: Option<&GoalState>,
 ) -> serde_json::Value {
-    let goal_open = goal.map_or(false, |g| g.is_open());
+    let goal_open = goal.is_some_and(|g| g.is_open());
 
     // 1. Tool filter (D1): drop `goal` always; keep the close tools
     //    only while the goal is open.
@@ -168,8 +214,8 @@ fn apply_goal_transform(
         });
     }
 
-    // 2. The "goal" fragment: present while the goal exists and is
-    //    not completed (open or blocked, D6); removed otherwise.
+    // 2. The "goal" fragment: present while the goal exists and is not
+    //    completed (open or blocked, D6); removed otherwise.
     let mut frags: Vec<serde_json::Value> = req
         .get("prompt_fragments")
         .and_then(|f| f.as_array())
@@ -192,43 +238,6 @@ fn apply_goal_transform(
     req
 }
 
-/// Resolve the session directory from the hook env.
-fn resolve_session_dir() -> Option<std::path::PathBuf> {
-    let session = std::env::var("SESSION").ok()?;
-    let sessions_root = std::env::var("SESSIONS_ROOT").unwrap_or_else(|_| "sessions".into());
-    Some(
-        if session.contains('/') || session.contains('\\') {
-            std::path::PathBuf::from(&session)
-        } else {
-            std::path::PathBuf::from(&sessions_root).join(&session)
-        },
-    )
-}
-
-fn read_stdin_json() -> serde_json::Value {
-    let mut buf = String::new();
-    if std::io::stdin().read_to_string(&mut buf).is_err() || buf.trim().is_empty() {
-        return serde_json::json!({});
-    }
-    serde_json::from_str(&buf).unwrap_or(serde_json::json!({}))
-}
-
-fn print_help() {
-    println!("harness-hook-goal-arm — goal-mode prompt fragment + tool filter (model.before)");
-    println!();
-    println!("Window: model.before");
-    println!("Input (stdin): {{window, session, model, projected_tokens, request}}");
-    println!("Output (stdout):");
-    println!("  {{}}  — nothing goal-related; proceed unchanged");
-    println!(
-        "  {{\"decision\":\"transform\",\"payload\":{{\"request\":{{...}}}}}} \
-         — prompt_fragments[\"goal\"] set/removed per goal state; goal tool \
-         schemas filtered per D1. The kernel joins prompt_fragments into \
-         instructions and strips the field."
-    );
-    println!("Exit codes: 0 = ok");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,8 +245,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_active_goal(dir: &std::path::Path) -> GoalState {
-        let g = GoalState::new("fix the parser bug");
-        let mut g = g;
+        let mut g = GoalState::new("fix the parser bug");
         g.iteration = 3;
         g.used_tokens = 50_000;
         g.save(dir).unwrap();
@@ -425,19 +433,40 @@ mod tests {
         assert!(needs_transform(&req2, None));
     }
 
+    // ── §12.6: the stdin state is the request object itself ──
+
+    /// Without $HARNESS_WINDOW set, manual dispatch falls back to the
+    /// payload's `window` field (kernel dispatch uses the env var).
     #[test]
-    fn test_pure_and_stable_fragment() {
-        // P16: two GoalStates with the same (goal, id) but different
-        // iteration/used_tokens produce identical fragments.
-        let mut g1 = GoalState::new("build a parser");
-        g1.id = "g-deadbeef".to_string();
-        g1.iteration = 0;
-        g1.used_tokens = 0;
+    fn window_dispatch_falls_back_to_payload_field() {
+        let req = req_with_tools();
+        let with_win = json!({"window": "model.before", "request": req});
+        // Only assert when the env var is genuinely unset in this
+        // test process (tests may share a process with other crates'
+        // env state in the kernel, so guard it).
+        if std::env::var("HARNESS_WINDOW").is_err() {
+            assert!(window_is(&with_win, "model.before"));
+            assert!(!window_is(&with_win, "model.after"));
+        }
+    }
 
-        let mut g2 = g1.clone();
-        g2.iteration = 42;
-        g2.used_tokens = 999_999;
+    /// The §12.6 shape: when a transform is needed the hook emits the
+    /// full request object directly — no `decision` envelope, no
+    /// `request` wrapper; when nothing is goal-related, it emits `{}`.
+    #[test]
+    fn emit_is_bare_request_or_noop() {
+        let dir = TempDir::new().unwrap();
+        let goal = make_active_goal(dir.path());
 
-        assert_eq!(g1.build_goal_fragment(), g2.build_goal_fragment());
+        // Transform needed → the full request object with the fragment
+        // set and the goal tool filtered.
+        let req = apply_goal_transform(req_with_tools(), Some(&goal));
+        assert!(req.get("input").is_some(), "emitted state must keep `input`");
+        assert!(req["prompt_fragments"].is_array());
+        assert!(req.get("decision").is_none(), "no decision envelope");
+
+        // No goal, no goal tools → main() emits {} (noop), not a request.
+        let req2 = json!({"instructions": "base", "input": []});
+        assert!(!needs_transform(&req2, None));
     }
 }

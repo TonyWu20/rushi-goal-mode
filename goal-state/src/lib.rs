@@ -56,10 +56,12 @@ pub struct GoalState {
     /// `sum` figure so the two stay consistent.
     #[serde(default)]
     pub used_tokens: u64,
-    /// The continuation counter: `run.idle` increments it on every
-    /// `continue` decision. Used only by the *logged* continuation
-    /// message ("continuation #N") and the TUI display — never by the
-    /// injected goal block (docs/goal-ux.md §1.1c).
+    /// The continuation counter: the `run.idle` hook increments it on
+    /// every continuation (issue #5 §12: the retired `continue`
+    /// decision is replaced by the hook appending a follow-queue
+    /// `user_message` to the session log). Used only by the *logged*
+    /// continuation message ("continuation #N") and the TUI display —
+    /// never by the injected goal block (docs/goal-ux.md §1.1c).
     #[serde(default)]
     pub iteration: u64,
     /// Set to true when the agent signals the goal is done.
