@@ -2,7 +2,7 @@
 
 The goal-mode application bundle for the `rushi` kernel.
 
-This repo contains the four pieces that form one capability:
+This repo contains the five pieces that form one capability:
 
 | Directory | Role | Consumed by |
 |---|---|---|
@@ -10,10 +10,12 @@ This repo contains the four pieces that form one capability:
 | `goal-hooks/` | Four loop hooks: `harness-hook-goal-{arm,compact,idle,tools}` | kernel `[hooks]` section, resolved on PATH |
 | `goal-tools/` | Three loop tools: `goal`, `goal_complete`, `goal_blocked` | kernel `[paths] extra_tools_roots` |
 | `goal-ext/` | TUI extension: command palette + row slot | TUI `[ext] dir` (via the `ui_extensions/goal` symlink) |
+| `rushi-goal/` | Headless seeder: writes the goal files for a session before the loop starts | user setup scripts (called as `rushi-goal`, issue #8) |
 
-All four depend on `rushi-goal-state` (the `goal-state/` directory) via a
-local path dep. No crate in this repo
-depends on anything outside this repo.
+All five depend on `rushi-goal-state` (the `goal-state/` directory) via a
+local path dep. No crate in this repo has a path dep outside this
+repo. The seeder crate uses `rushi-common` from crates.io.
+That crate provides the kernel config path ladder.
 
 ## Build
 
@@ -24,7 +26,7 @@ table. Build them all in one shot:
 cargo build -p rushi-goal-state \
   -p hook-goal-arm -p hook-goal-compact -p hook-goal-idle -p hook-goal-tools \
   -p goal -p goal_complete -p goal_blocked \
-  -p goal-ext
+  -p goal-ext -p rushi-goal
 ```
 
 Or, if you use the kernel's `ext-env.sh`, it already includes every package
@@ -52,6 +54,10 @@ layer.
 ## Repo boundaries
 
 - This repo is self-contained: no path deps outside the kernel.
+- The `rushi-goal` seeder uses `rushi-common` from crates.io.
+  That crate is the kernel shared crate. It provides
+  `resolve_config_path` so the seeder and the loop resolve the
+  config the same way.
 - `rushi-goal-state` (the `goal-state/` directory) is the single source of truth for the goal JSON schema
   and lives in this repo (it left the kernel at the split). The hooks,
   tools, and ext all read/write the same file through it.

@@ -103,6 +103,16 @@
           goal-blocked = wrapAsTool { name = "goal_blocked"; toolToml = "${self}/goal-tools/goal_blocked/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal_blocked"; crateName = "goal_blocked"; }; };
           goal-complete = wrapAsTool { name = "goal_complete"; toolToml = "${self}/goal-tools/goal_complete/tool.toml"; built = buildCrate { crateDir = "goal-tools/goal_complete"; crateName = "goal_complete"; }; };
 
+          # ── Headless goal seeder (issue #8) ──
+          # A bare binary for user setup scripts, not a loop tool and
+          # not an ext: it has no tool.toml and no ext.toml. It
+          # resolves the kernel's config ladder via the published
+          # `rushi-common` crate and arms the session's goal files
+          # before the loop starts. The binary lands at
+          # $out/bin/rushi-goal, so putting this package's bin/ on
+          # PATH makes `rushi-goal` callable by name.
+          rushi-goal = buildCrate { crateDir = "rushi-goal"; crateName = "rushi-goal"; };
+
           # Tag a hook package with meta.rushi.bin (rushi#13): the runtime
           # binary name (the crate's [[bin]] name, from its Cargo.toml), so
           # lib.mkRushi can derive / drift-guard hook commands at eval time.

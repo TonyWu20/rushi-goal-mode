@@ -1,0 +1,48 @@
+# `rushi-goal` — the headless goal seeder (rushi-goal-mode issue #8).
+#
+# A user setup script calls this once, right before it execs
+# `rushi run`, to arm the goal files for the session. It resolves the
+# config by the kernel's ladder (`rushi_common::paths::
+# resolve_config_path`), reads `sessions_root` from that config,
+# creates the session dir if needed, and writes `goal.json` plus
+# `goal-<id>.json` as a fresh active goal (the same files the `goal`
+# loop tool writes). It prints nothing on success and exits 0. The
+# task text is never echoed: the script passes it to its own
+# `exec rushi run` line.
+#
+# Usage:
+#   rushi-goal <SESSION> <GOAL_PROMPT> [--config /path]
+#
+# Standalone cargo package: the empty `[workspace]` table stops cargo
+# from attaching it to an ancestor workspace, like every other
+# crate in this repo.
+#
+# Build: `cargo build` in this directory. The binary lands in
+# ./target/debug/rushi-goal. Put that dir (or a release build) on
+# PATH so a setup script can call `rushi-goal` by name.
+
+[package]
+name = "rushi-goal"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "rushi-goal"
+path = "src/main.rs"
+
+[dependencies]
+# The kernel's shared crate (published to crates.io): config-path
+# resolution by the kernel's ladder. This is the one cross-repo
+# dependency the seeder needs; the design says not to reinvent the
+# config ladder.
+rushi-common = "0.1.5"
+# `rushi-goal-state` is a sibling crate in this goal-app repo. The
+# seeder shares it via a local path dep.
+rushi-goal-state = { path = "../goal-state" }
+# Parse the resolved config TOML to read `[paths] sessions_root`.
+toml = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
