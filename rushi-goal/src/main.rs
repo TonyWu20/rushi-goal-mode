@@ -140,9 +140,12 @@ fn read_sessions_root(config_path: &Path) -> Result<PathBuf, String> {
             config_path.display()
         )
     })?;
-    let v: toml::Value = text
-        .parse()
-        .map_err(|e| format!("invalid TOML in the config {}: {e}", config_path.display()))?;
+    let v: toml::Value = toml::from_str(&text).map_err(|e| {
+        format!(
+            "invalid TOML in the config {}: {e}",
+            config_path.display()
+        )
+    })?;
     let raw = v
         .get("paths")
         .and_then(|p| p.get("sessions_root"))

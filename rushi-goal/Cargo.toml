@@ -42,7 +42,9 @@ rushi-common = "0.1.5"
 # seeder shares it via a local path dep.
 rushi-goal-state = { path = "../goal-state" }
 # Parse the resolved config TOML to read `[paths] sessions_root`.
-toml = "0.7"
+# Uses toml 1.x and the document-level `toml::from_str`: in 1.x the
+# `Value` FromStr parses a single value, not a whole document.
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
