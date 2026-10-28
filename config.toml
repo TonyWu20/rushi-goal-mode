@@ -1,0 +1,105 @@
+[active]
+model = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+[hooks]
+timeout_ms = 30000
+[hooks.defs]
+[hooks.defs.harness-hook-compact]
+command = "harness-hook-compact"
+[hooks.defs.harness-hook-goal-arm]
+command = "harness-hook-goal-arm"
+[hooks.defs.harness-hook-goal-compact]
+command = "harness-hook-goal-compact"
+[hooks.defs.harness-hook-goal-idle]
+command = "harness-hook-goal-idle"
+[hooks.defs.harness-hook-goal-tokens]
+command = "harness-hook-goal-tokens"
+[hooks.defs.harness-hook-goal-tools]
+command = "harness-hook-goal-tools"
+[hooks.defs.harness-hook-no-find-grep]
+command = "harness-hook-no-find-grep"
+[hooks.defs.harness-hook-simple-english]
+command = "harness-hook-simple-english"
+[hooks.pipeline]
+[hooks.pipeline."compact.before"]
+steps = [ "harness-hook-goal-compact" ]
+[hooks.pipeline."exhausted.handle"]
+steps = [ "harness-hook-compact" ]
+[hooks.pipeline."model.after"]
+steps = [ "harness-hook-goal-tokens" ]
+[hooks.pipeline."model.before"]
+steps = [ "harness-hook-goal-arm", "harness-hook-simple-english" ]
+[hooks.pipeline."overflow.resolve"]
+steps = [ "harness-hook-compact" ]
+[hooks.pipeline."run.idle"]
+steps = [ "harness-hook-goal-idle", "harness-hook-simple-english" ]
+[hooks.pipeline."tool.before"]
+steps = [ "harness-hook-goal-tools", "harness-hook-no-find-grep", "harness-hook-simple-english" ]
+[limits]
+bash_max_output_bytes = 16000
+bash_timeout_default = 60
+bash_timeout_max = 600
+compact_enabled = true
+compact_keep_tokens = 20000
+compact_reserve_tokens = 16384
+compact_strategy = "compact"
+context_budget_tokens = 262144
+read_limit = 2000
+read_max_bytes = 51200
+read_max_line_length = 2000
+read_stream_min_size = 10485760
+tool_result_max_chars = 20000
+write_max_bytes = 1048576
+[loop]
+arg_style = "append_session"
+args = [ "run" ]
+command = "rushi"
+[model]
+api = "responses"
+max_output_tokens = 65536
+reasoning_effort = "xhigh"
+[model."Qwen3.8-27B-NVFP4-RTX5090-DFlash2"]
+api_key_env = "LLAMA_API_KEY"
+base_url = "http://127.0.0.1:30000"
+context_tokens = 262144
+model_id = "Qwen3.8-27B-NVFP4-RTX5090-DFlash2"
+vision = true
+[paths]
+extension_tool_paths = [ "/nix/store/r4gzlc3l48kw6w86z54cs8c6f1jyfsd7-goal-tool-0.1.0", "/nix/store/4923kcwy8913c31gxqz3fphnnlaz7ixj-goal_blocked-tool-0.1.0", "/nix/store/8lsvhdvgcdm07p58cjawkvbyh9p26fgc-goal_complete-tool-0.1.0", "/nix/store/p9gwdfh6j8hirc45vnhln85xcmbadk7x-web_fetch-tool-0.1.0", "/nix/store/n4zl2by4f13qv351l0gk2yggza2j3am2-web_search-tool-0.1.0" ]
+native_tool_paths = [ "/nix/store/zaw9chw2x0v0rl0xfkpb7pan85rq55md-rushi-0.1.5/tools/bash", "/nix/store/zaw9chw2x0v0rl0xfkpb7pan85rq55md-rushi-0.1.5/tools/edit", "/nix/store/zaw9chw2x0v0rl0xfkpb7pan85rq55md-rushi-0.1.5/tools/read", "/nix/store/zaw9chw2x0v0rl0xfkpb7pan85rq55md-rushi-0.1.5/tools/write" ]
+sessions_root = "sessions"
+[system_prompt]
+text = '''
+You are an expert coding assistant in `rushi`, a Unix agent harness.
+You help the user by reading files, running commands, editing code,
+and writing new files.
+
+Codebase is the truth. @docs/ is the place for context documents, but they might be stale.
+Always confirm any claim against the code and written docs.
+
+Guidelines:
+- Plan first. Split the task into steps before you code.
+- Never silently decide anything on your own. Report and brief to the users what you find needs consideration and decisions.
+- Actively bookkeeping user's decisions during the session to the local repo. Looks for where the documents are saved. If there is none, ask for user's opinion on creating one.
+- Build and test after changes. Run the commands that prove the change.
+- Prefer read, edit, and write over bash for file work.
+- Use read to examine files instead of cat or sed.
+- Use offset and limit to continue reading large files.
+- Keep replies short. Show file paths clearly in your replies.
+- Report to user by straight plain statement of what is done, how it matches
+  the design spec, what behavior does your test expect.
+
+'''
+[tui]
+binary = ""
+clipboard = "unnamed"
+color = ""
+color_scheme = ""
+ext_dirs = []
+[tui.tool_display]
+anim_ms = 400
+bash_collapsed_lines = 5
+diff_collapsed_lines = 12
+diff_view = "auto"
+expand_mode = "click"
+highlight_engine = "tree-sitter"
+preset = "opencode"
